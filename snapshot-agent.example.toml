@@ -1,6 +1,12 @@
+# Copy to ~/.snapshot-agent.toml and chmod 600 it.
+# On Windows, write paths with forward slashes (C:/Users/you/...) or in
+# single quotes ('C:\Users\you\...'): TOML reads \U in a double-quoted
+# string as an escape code and will refuse to parse it.
+
 endpoint = "https://collect.example.com"
 api_key = "replace-me"
 interval_seconds = 300
+queue_path = "~/.snapshot-agent-queue.db"
 
 [[project]]
 name = "flockatime"

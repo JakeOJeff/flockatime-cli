@@ -1,11 +1,13 @@
-// Command snapshot-agent records the shape of a project directory --- paths
-// hashes, line counts, content hashes --- and reports them to a collection
+// Command snapshot-agent records the shape of a project directory --- path
+// hashes, content hashes, line counts --- and reports it to a collection
 // endpoint. It never reads, transmits, or logs file contents.
 package main
 
 import (
 	"fmt"
 	"os"
+
+	"snapshot-agent/internal/config"
 )
 
 const agentVersion = "0.1.0"
@@ -13,10 +15,13 @@ const agentVersion = "0.1.0"
 const usage = `snapshot-agent ` + agentVersion + `
 
 usage:
-  snapshot-agent once     capture one snapshot per project, print JSON, send nothing
-  snapshot-agent run      daemon loop: capture every interval and POST
-  snapshot-agent doctor   validate config, probe the endpoint, print project stats
-  snapshot-agent version  print the agent version
+  snapshot-agent once [dir]    capture one snapshot, print JSON, send nothing
+  snapshot-agent run           daemon loop: capture every interval and POST
+  snapshot-agent doctor        validate config, probe endpoint, print project stats
+  snapshot-agent devserver     a local endpoint that prints what it receives
+  snapshot-agent version       print the agent version
+
+config: ~/.snapshot-agent.toml (mode 0600)
 `
 
 func main() {
@@ -33,6 +38,8 @@ func main() {
 		err = cmdRun(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(os.Args[2:])
+	case "devserver":
+		err = cmdDevServer(os.Args[2:])
 	case "version":
 		fmt.Println(agentVersion)
 	case "-h", "--help", "help":
@@ -48,10 +55,11 @@ func main() {
 	}
 }
 
-func cmdOnce(args []string) error   { return errNotImplemented("once") }
-func cmdRun(args []string) error    { return errNotImplemented("run") }
-func cmdDoctor(args []string) error { return errNotImplemented("doctor") }
-
-func errNotImplemented(cmd string) error {
-	return fmt.Errorf("%s: not implemented yet", cmd)
+// configPath honours SNAPSHOT_AGENT_CONFIG so a test run never has to touch
+// the real config in your home directory.
+func configPath() (string, error) {
+	if p := os.Getenv("SNAPSHOT_AGENT_CONFIG"); p != "" {
+		return p, nil
+	}
+	return config.DefaultPath()
 }
