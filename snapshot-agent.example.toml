@@ -1,0 +1,7 @@
+endpoint = "https://collect.example.com"
+api_key = "replace-me"
+interval_seconds = 300
+
+[[project]]
+name = "flockatime"
+path = "D:/products/flockatime"

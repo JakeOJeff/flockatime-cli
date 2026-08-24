@@ -1,0 +1,6 @@
+/snapshot-agent
+/snapshot-agent.exe
+/dist/
+*.db
+*.bolt
+.snapshot-agent.toml
