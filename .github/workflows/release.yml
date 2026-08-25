@@ -1,0 +1,124 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.1.0). Builds artifacts only, publishes nothing.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: resolve version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "building $version"
+
+      # A tag that disagrees with the source is a release nobody can debug.
+      - name: version matches source
+        run: |
+          want="${{ steps.v.outputs.version }}"
+          have=$(grep -oP 'var agentVersion = "\K[^"]+' main.go)
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag says $want but main.go says $have --- bump agentVersion first"
+            exit 1
+          fi
+
+      - name: test
+        run: go test -race -count=1 ./...
+
+      - name: build all targets
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          version="${{ steps.v.outputs.version }}"
+          mkdir -p dist
+          targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+          for t in $targets; do
+            goos="${t%/*}"; goarch="${t#*/}"
+            name="snapshot-agent"
+            [ "$goos" = "windows" ] && name="snapshot-agent.exe"
+            outdir="build/snapshot-agent_${version}_${goos}_${goarch}"
+            mkdir -p "$outdir"
+            echo "--> $goos/$goarch"
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -ldflags "-s -w -X main.agentVersion=${version}" \
+              -o "$outdir/$name" .
+            cp readme.md snapshot-agent.example.toml "$outdir/"
+            if [ "$goos" = "windows" ]; then
+              (cd build && zip -qr "../dist/$(basename "$outdir").zip" "$(basename "$outdir")")
+            else
+              tar -czf "dist/$(basename "$outdir").tar.gz" -C build "$(basename "$outdir")"
+            fi
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -lh dist
+
+      # The one target this runner can actually execute --- prove the stamped
+      # binary reports the version the tag promised.
+      - name: verify the linux/amd64 binary
+        run: |
+          version="${{ steps.v.outputs.version }}"
+          bin="build/snapshot-agent_${version}_linux_amd64/snapshot-agent"
+          got=$("$bin" version)
+          test "$got" = "$version" || { echo "::error::binary reports $got, expected $version"; exit 1; }
+          "$bin" once . > /dev/null
+          echo "ok: $got"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-agent-${{ steps.v.outputs.version }}
+          path: dist/
+          retention-days: 30
+
+      - name: publish github release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.v.outputs.version }}"
+          notes=$(mktemp)
+          {
+            echo "## snapshot-agent $version"
+            echo
+            echo "Static, CGO-free binaries. Download the archive for your platform,"
+            echo "put \`snapshot-agent\` on your PATH, then:"
+            echo
+            echo '```'
+            echo "snapshot-agent once .      # snapshot this directory, send nothing"
+            echo "snapshot-agent doctor      # validate config and endpoint"
+            echo "snapshot-agent run         # daemon loop"
+            echo '```'
+            echo
+            echo "Verify a download against \`SHA256SUMS\`."
+          } > "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "snapshot-agent $version" \
+            --notes-file "$notes" \
+            --generate-notes \
+            dist/*

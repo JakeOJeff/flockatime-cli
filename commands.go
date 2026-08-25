@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -17,6 +19,10 @@ import (
 
 // batchLimit caps how much backlog rides along with one request.
 const batchLimit = 200
+
+// errReported means the command has already explained the failure on stdout
+// and main should exit non-zero without printing it a second time.
+var errReported = errors.New("already reported")
 
 // cmdOnce captures a single snapshot per project and prints the payload. With
 // a directory argument it skips the config entirely, which is the quickest way
@@ -165,7 +171,10 @@ func cmdDoctor(args []string) error {
 	cfg, err := config.Load(path, true)
 	if err != nil {
 		fmt.Printf("status:   INVALID --- %v\n", err)
-		return err
+		if errors.Is(err, config.ErrNoConfig) {
+			printConfigHelp(path)
+		}
+		return errReported
 	}
 	fmt.Printf("endpoint: %s/v1/snapshots\n", cfg.Endpoint)
 	fmt.Printf("interval: %ds\n", cfg.IntervalSeconds)
@@ -227,4 +236,27 @@ func mask(k string) string {
 		return "****"
 	}
 	return "****" + k[len(k)-4:]
+}
+
+// printConfigHelp is what `doctor` prints when there is no config at all ---
+// the first thing anyone hits on a fresh machine.
+func printConfigHelp(path string) {
+	fmt.Printf(`
+fix:      create %s with at least:
+
+            endpoint = "https://collect.example.com"
+            api_key = "your-key"
+
+            [[project]]
+            name = "flockatime"
+            path = "D:/products/flockatime"
+
+          snapshot-agent.example.toml in this repo is a ready-made copy.
+          On Windows write paths with forward slashes or in 'single quotes':
+          TOML reads \U in a double-quoted string as an escape code.
+`, path)
+	if runtime.GOOS != "windows" {
+		fmt.Printf("          Then: chmod 600 %s\n", path)
+	}
+	fmt.Printf("\nno config needed:  snapshot-agent once .   (snapshots this directory, sends nothing)\n")
 }

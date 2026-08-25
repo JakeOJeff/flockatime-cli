@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +15,10 @@ import (
 
 // DefaultInterval is used when interval_seconds is absent or zero.
 const DefaultInterval = 300
+
+// ErrNoConfig reports a config file that simply is not there yet, so callers
+// can print the how-to-fix instead of a raw syscall error.
+var ErrNoConfig = errors.New("no config file")
 
 // Config is the on-disk agent configuration.
 type Config struct {
@@ -131,7 +137,10 @@ func ExpandPath(p string) (string, error) {
 func checkPerms(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("reading config: %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w at %s", ErrNoConfig, path)
+		}
+		return fmt.Errorf("reading config %s: %w", path, err)
 	}
 	if runtime.GOOS == "windows" {
 		// Windows fakes the Unix mode bits; ACLs are the real control.

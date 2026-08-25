@@ -4,15 +4,18 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"snapshot-agent/internal/config"
 )
 
-const agentVersion = "0.1.0"
+// agentVersion is stamped at link time by the release build with
+// -ldflags "-X main.agentVersion=...". A plain `go build` keeps this default.
+var agentVersion = "0.1.0"
 
-const usage = `snapshot-agent ` + agentVersion + `
+var usage = `snapshot-agent ` + agentVersion + `
 
 usage:
   snapshot-agent once [dir]    capture one snapshot, print JSON, send nothing
@@ -50,7 +53,13 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "snapshot-agent:", err)
+		// doctor prints its own diagnosis --- do not say it twice.
+		if !errors.Is(err, errReported) {
+			fmt.Fprintln(os.Stderr, "snapshot-agent:", err)
+			if errors.Is(err, config.ErrNoConfig) {
+				fmt.Fprintln(os.Stderr, "  run `snapshot-agent doctor` to see how to create one")
+			}
+		}
 		os.Exit(1)
 	}
 }

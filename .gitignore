@@ -1,6 +1,13 @@
+# build output --- never commit binaries
 /snapshot-agent
 /snapshot-agent.exe
+/snapagent
+/snapagent.exe
 /dist/
+*.exe
+*.test
+
+# local state
 *.db
 *.bolt
 .snapshot-agent.toml
