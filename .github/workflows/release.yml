@@ -47,6 +47,12 @@ jobs:
             exit 1
           fi
 
+      # A release must not ship a binary with known stdlib vulnerabilities.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          govulncheck ./...
+
       - name: test
         run: go test -race -count=1 ./...
 

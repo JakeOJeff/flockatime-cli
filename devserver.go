@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"snapshot-agent/internal/snapshot"
 )
@@ -24,7 +25,8 @@ func cmdDevServer(args []string) error {
 		}
 	}
 
-	http.HandleFunc("/v1/snapshots", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK) // doctor's reachability probe
 			return
@@ -56,6 +58,18 @@ func cmdDevServer(args []string) error {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
+	// Explicit timeouts. A default http.Server has none, so one stalled
+	// client holds a connection open forever; ReadHeaderTimeout is what
+	// bounds a slow-header client specifically.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	fmt.Fprintf(os.Stderr, "devserver listening on http://%s (POST /v1/snapshots)\n", addr)
-	return http.ListenAndServe(addr, nil)
+	return srv.ListenAndServe()
 }

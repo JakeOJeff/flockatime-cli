@@ -1,0 +1,10 @@
+# Workflows are authored on Windows but executed by bash on Linux runners.
+# A CR surviving into a `run:` block fails as $'\r': command not found.
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sh   text eol=lf
+
+# Go tooling assumes LF everywhere.
+*.go   text eol=lf
+*.mod  text eol=lf
+*.sum  text eol=lf
