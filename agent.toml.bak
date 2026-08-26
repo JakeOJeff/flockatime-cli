@@ -6,7 +6,3 @@ queue_path = "~/.snapshot-agent-queue.db"
 [[project]]
 name = "flockatime"
 path = "D:/products/flockatime"
-
-[[project]]
-name = "flockatime-cli"
-path = "D:/products/flockatime-cli"
