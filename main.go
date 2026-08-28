@@ -21,6 +21,8 @@ usage:
   snapshot-agent once [dir]    capture one snapshot, print JSON, send nothing
   snapshot-agent run           daemon loop: capture every interval and POST
   snapshot-agent doctor        validate config, probe endpoint, print project stats
+  snapshot-agent install       start the agent at every login, in the background
+  snapshot-agent uninstall     stop starting it at login
   snapshot-agent devserver     a local endpoint that prints what it receives
   snapshot-agent version       print the agent version
 
@@ -43,6 +45,10 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "devserver":
 		err = cmdDevServer(os.Args[2:])
+	case "install":
+		err = cmdInstall(os.Args[2:])
+	case "uninstall":
+		err = cmdUninstall(os.Args[2:])
 	case "version":
 		fmt.Println(agentVersion)
 	case "-h", "--help", "help":

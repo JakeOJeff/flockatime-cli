@@ -13,6 +13,7 @@ import (
 
 	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/config"
+	"snapshot-agent/internal/discover"
 	"snapshot-agent/internal/queue"
 	"snapshot-agent/internal/snapshot"
 	"snapshot-agent/internal/transport"
@@ -124,6 +125,10 @@ func cmdRun(args []string) error {
 			case on && !active:
 				active = true
 				logf("waking --- activity detected")
+				// Re-scan on the way up: a repository cloned since the last
+				// session is exactly what someone means by "I opened a new
+				// project", and it should not need a restart to be seen.
+				rediscover(cfg)
 				// Capture immediately: waiting for the next capture tick
 				// would lose the first interval of the session.
 				tick(cfg, client, q, lastHash)
@@ -143,6 +148,29 @@ func cmdRun(args []string) error {
 			logf("shutting down")
 			return nil
 		}
+	}
+}
+
+// rediscover adds repositories that have appeared under the discovery roots
+// since the last scan. It only ever adds: a project that has gone away keeps
+// failing its capture and saying so, rather than vanishing silently.
+func rediscover(cfg *config.Config) {
+	if len(cfg.Discovery.Roots) == 0 {
+		return
+	}
+	names := make(map[string]bool, len(cfg.Projects))
+	paths := make(map[string]bool, len(cfg.Projects))
+	for _, p := range cfg.Projects {
+		names[p.Name] = true
+		paths[p.Path] = true
+	}
+	for _, d := range discover.ScanAll(cfg.Discovery.Roots, cfg.Discovery.MaxDepth, names) {
+		if paths[d.Path] {
+			continue
+		}
+		paths[d.Path] = true
+		cfg.Projects = append(cfg.Projects, config.Project{Name: d.Name, Path: d.Path})
+		logf("discovered new project %q", d.Name)
 	}
 }
 
@@ -223,6 +251,7 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("api_key:  %s\n", mask(cfg.APIKey))
 
 	printActivity(cfg)
+	printDiscovery(cfg)
 
 	client := transport.New(cfg.Endpoint, cfg.APIKey)
 	if err := client.Reachable(); err != nil {
@@ -281,6 +310,33 @@ func printActivity(cfg *config.Config) {
 	}
 	fmt.Printf("          last activity %s ago --- would start %s\n",
 		time.Since(last).Round(time.Second), state)
+}
+
+// wideScan is the point past which a discovery root is more likely to be a
+// mistake than an intention. Every repository found is walked and hashed on
+// every tick, so a root pointed at a whole drive is quietly expensive.
+const wideScan = 20
+
+// printDiscovery reports what the scan found and how long it took, so a root
+// that is too broad shows up here rather than as a hot fan six months later.
+func printDiscovery(cfg *config.Config) {
+	if len(cfg.Discovery.Roots) == 0 {
+		return
+	}
+	start := time.Now()
+	found := discover.ScanAll(cfg.Discovery.Roots, cfg.Discovery.MaxDepth, nil)
+	elapsed := time.Since(start).Round(time.Millisecond)
+
+	fmt.Printf("discovery: %d root(s), max_depth %d --- %d repo(s) in %s\n",
+		len(cfg.Discovery.Roots), cfg.Discovery.MaxDepth, len(found), elapsed)
+	for _, r := range cfg.Discovery.Roots {
+		fmt.Printf("          %s\n", r)
+	}
+	if len(found) > wideScan {
+		fmt.Printf("          WARNING: %d repositories is a lot to hash every %ds.\n",
+			len(found), cfg.IntervalSeconds)
+		fmt.Printf("          Narrow `roots`, or lower `max_depth`, unless you mean it.\n")
+	}
 }
 
 func logf(format string, args ...any) {

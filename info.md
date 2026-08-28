@@ -16,12 +16,13 @@ file *names* leave your machine as fingerprints rather than words.
 1. [What a "fingerprint" means here](#1-what-a-fingerprint-means-here)
 2. [Try it in five minutes](#2-try-it-in-five-minutes)
 3. [Testing the WakaTime activity gate](#3-testing-the-wakatime-activity-gate)
-4. [How it works, step by step](#4-how-it-works-step-by-step)
-5. [Configuration](#5-configuration)
-6. [Commands](#6-commands)
-7. [What it sends](#7-what-it-sends)
-8. [Running the tests](#8-running-the-tests)
-9. [Project layout](#9-project-layout)
+4. [Setting it up so nobody has to run it](#4-setting-it-up-so-nobody-has-to-run-it)
+5. [How it works, step by step](#5-how-it-works-step-by-step)
+6. [Configuration](#6-configuration)
+7. [Commands](#7-commands)
+8. [What it sends](#8-what-it-sends)
+9. [Running the tests](#9-running-the-tests)
+10. [Project layout](#10-project-layout)
 
 ---
 
@@ -451,7 +452,139 @@ record.
 
 ---
 
-## 4. How it works, step by step
+## 4. Setting it up so nobody has to run it
+
+Everything so far assumed you type `snapshot-agent run` yourself and list every
+project by hand. Neither is necessary.
+
+Worth being honest about the goal. WakaTime isn't magic either — somebody
+installed the editor plugin once, and *that* is what runs `wakatime-cli`. The
+target here is the same: **one command, once, then never again.** There is no
+version of this where nothing is ever installed.
+
+### Start at login
+
+```
+snapshot-agent install
+```
+
+```
+installed: starts at every login, hidden, no Administrator needed
+  binary:   C:\Users\you\bin\snapshot-agent.exe
+  login item: C:\Users\you\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\snapshot-agent.vbs
+```
+
+On Windows this writes a one-line launcher into your Startup folder. It uses
+the Startup folder rather than a scheduled task on purpose: `schtasks
+/sc onlogon` **requires Administrator**, and a program that watches your own
+folders has no business asking for that. The launcher exists because the agent
+is a console program — started directly it would leave a terminal window open
+for as long as it runs, so the script starts it with the window hidden instead.
+
+On macOS and Linux, `install` prints the launchd plist or systemd user unit to
+save, because guessing at someone's init system is worse than showing them the
+file.
+
+Undo it at any time:
+
+```
+snapshot-agent uninstall
+```
+
+That removes the login item only. Your config, your queue, and any agent
+already running are left alone.
+
+> **A login item has no window, so it has nowhere to print.** If the config is
+> broken, the agent exits at login and you see nothing at all. `install` checks
+> the config first and warns you before that can happen, but if the agent ever
+> seems to be doing nothing, `snapshot-agent doctor` is the thing to run.
+
+### Stop listing projects by hand
+
+Point `[discovery]` at the folders your work lives in and every git repository
+underneath becomes a project:
+
+```toml
+[discovery]
+roots     = ["D:/products"]
+max_depth = 2
+```
+
+With that, no `[[project]]` entries are needed at all:
+
+```
+discovery: 1 root(s), max_depth 2 --- 3 repo(s) in 1ms
+          D:\products
+
+projects:
+  flockatime       D:\products\flockatime
+  flockatime-cli   D:\products\flockatime-cli
+  nomeadow         D:\products\nomeadow
+```
+
+`nomeadow` was never configured. It was found.
+
+A repository is never descended into, so a submodule reports as part of its
+parent rather than as a project of its own. `node_modules`, `vendor`, `target`,
+`dist`, `build`, and dotted folders are skipped, which is most of what makes a
+naive scan slow. Two checkouts that share a folder name get disambiguated by
+their parent (`work-api` and `personal-api`) rather than colliding, and a name
+already used by a `[[project]]` entry is never taken — manual entries always
+win.
+
+The roots are re-scanned every time the agent wakes, so cloning something new
+and starting work on it is enough. No restart.
+
+### Scan narrowly
+
+**This is the setting to get right.** Every repository found is walked and
+hashed on *every tick*. On the machine this was written on:
+
+| Root | Repos | Cost per tick |
+|---|---|---|
+| `D:/products` | 3 | negligible |
+| `D:/Projects` | 73 | ~20s of solid CPU |
+
+The second one is not a config, it's a space heater. `doctor` tells you before
+you find out the hard way:
+
+```
+discovery: 1 root(s), max_depth 2 --- 73 repo(s) in 3ms
+          D:\Projects
+          WARNING: 73 repositories is a lot to hash every 300s.
+          Narrow `roots`, or lower `max_depth`, unless you mean it.
+```
+
+Note how fast *finding* them is (3ms) compared to hashing them. Discovery is
+cheap; what discovery signs you up for is not.
+
+### The whole zero-touch setup
+
+```toml
+endpoint = "https://collect.example.com"
+api_key  = "..."
+
+[activity]
+source = "wakatime"
+
+[discovery]
+roots = ["D:/products"]
+```
+
+Then once:
+
+```
+snapshot-agent install
+```
+
+From then on: log in, open a project, start typing. The agent wakes on your
+first heartbeat, finds the repository you're in whether or not it existed last
+week, snapshots it every five minutes while you work, and goes quiet ten
+minutes after you stop.
+
+---
+
+## 5. How it works, step by step
 
 What follows is everything the program does, in the order it does it.
 
@@ -570,7 +703,7 @@ being dropped.
 
 ---
 
-## 5. Configuration
+## 6. Configuration
 
 Location: `~/.snapshot-agent.toml`, or the path in `SNAPSHOT_AGENT_CONFIG`.
 Must not be readable by anyone but you (`chmod 600`).
@@ -612,7 +745,7 @@ path = "D:/products/flockatime"
 
 ---
 
-## 6. Commands
+## 7. Commands
 
 | Command | What it does |
 |---|---|
@@ -620,12 +753,14 @@ path = "D:/products/flockatime"
 | `snapshot-agent once <dir>` | Same, for one folder, ignoring the config entirely. The fastest way to see what would be sent. |
 | `snapshot-agent run` | The daemon: capture every interval, send, queue on failure. With `[activity]` set to `wakatime`, it captures only while you're editing and goes dormant otherwise. `Ctrl+C` stops it cleanly. |
 | `snapshot-agent doctor` | Check the config, probe the endpoint, print each project's resolved path and file count, report how many snapshots are waiting in the queue, and say which activity state `run` would start in. Sends nothing. |
+| `snapshot-agent install` | Register the agent to start at every login, hidden, without Administrator. Warns first if the config would stop it starting. |
+| `snapshot-agent uninstall` | Remove that login entry. Leaves the config, the queue, and any running agent alone. |
 | `snapshot-agent devserver [port]` | A local endpoint that prints what it receives and stores nothing. For trying the agent out. |
 | `snapshot-agent version` | Print the version. |
 
 ---
 
-## 7. What it sends
+## 8. What it sends
 
 ```json
 [{
@@ -653,7 +788,7 @@ the commit hash.
 
 ---
 
-## 8. Running the tests
+## 9. Running the tests
 
 ```
 go test ./...
@@ -674,6 +809,10 @@ The suite covers the behaviours that would be easiest to get quietly wrong:
 - **The queue flushes oldest-first**, doesn't delete anything until the server
   accepts it, removes only the part that was actually sent, preserves
   `captured_at` across the outage, and drops the oldest entries at 5,000.
+- **Discovery finds repositories** at the configured depth, never descends into
+  one (so a submodule is not a project), skips heavy and hidden folders,
+  disambiguates two checkouts that share a name, refuses a name already used by
+  a manual entry, and reports a repo reachable from two roots only once.
 - **The activity gate reads the newest heartbeat file**, counts a heartbeat
   banked in WakaTime's offline queue as activity (so a WakaTime outage isn't
   mistaken for you leaving), treats an unreadable or missing signal as idle
@@ -685,16 +824,18 @@ seconds.
 
 ---
 
-## 9. Project layout
+## 10. Project layout
 
 ```
 .
 ├── main.go                     command dispatch
 ├── commands.go                 once / run / doctor, and the daemon tick
 ├── devserver.go                the throwaway local endpoint
+├── install.go                  register the agent to start at login
 └── internal/
     ├── config/config.go        TOML config, permission check, path expansion
     ├── activity/activity.go    when to capture: WakaTime heartbeats, or always
+    ├── discover/discover.go    what to capture: repos found under the roots
     ├── snapshot/
     │   ├── snapshot.go         payload types, tree hash, capture
     │   ├── walk.go             tree walk, .gitignore, skip lists, size cap

@@ -25,3 +25,14 @@ source          = "wakatime"
 idle_multiplier = 2     # dormant after 2 x interval_seconds of quiet
 poll_seconds    = 30    # how often to check for a heartbeat
 wakatime_dir    = "~/.wakatime"
+
+# Optional. Find projects by scanning parent folders for git repositories, so
+# a new checkout is tracked without adding a [[project]] entry for it. Any
+# [[project]] entries above still apply and take priority.
+#
+# Scan narrowly. Every repository found is walked and hashed on every tick:
+# pointing a root at a whole drive is quietly expensive. `doctor` prints how
+# many it found and warns when that number gets silly.
+[discovery]
+roots     = ["D:/products"]
+max_depth = 2

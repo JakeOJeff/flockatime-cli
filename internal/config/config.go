@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"snapshot-agent/internal/discover"
 )
 
 // DefaultInterval is used when interval_seconds is absent or zero.
@@ -28,7 +30,18 @@ type Config struct {
 	IntervalSeconds int       `toml:"interval_seconds"`
 	QueuePath       string    `toml:"queue_path"`
 	Activity        Activity  `toml:"activity"`
+	Discovery       Discovery `toml:"discovery"`
 	Projects        []Project `toml:"project"`
+}
+
+// Discovery finds projects by scanning parent folders for git repositories,
+// so a new checkout is tracked without adding a [[project]] entry. Scanning
+// wide is expensive --- every repository found is walked and hashed on every
+// tick --- so Roots should name the folders your work actually lives in, not
+// a whole drive.
+type Discovery struct {
+	Roots    []string `toml:"roots"`
+	MaxDepth int      `toml:"max_depth"`
 }
 
 // Activity controls when the daemon captures at all. With the default source
@@ -103,9 +116,6 @@ func (c *Config) Validate(requireEndpoint bool) error {
 		}
 	}
 	c.Endpoint = strings.TrimRight(c.Endpoint, "/")
-	if len(c.Projects) == 0 {
-		return fmt.Errorf("no [[project]] entries; nothing to snapshot")
-	}
 	seen := make(map[string]bool, len(c.Projects))
 	for i := range c.Projects {
 		p := &c.Projects[i]
@@ -129,6 +139,55 @@ func (c *Config) Validate(requireEndpoint bool) error {
 			return fmt.Errorf("project %q: not a directory", p.Name)
 		}
 		p.Path = abs
+	}
+
+	if err := c.applyDiscovery(seen); err != nil {
+		return err
+	}
+	if len(c.Projects) == 0 {
+		return fmt.Errorf("nothing to snapshot: no [[project]] entries, and no repositories found under the [discovery] roots")
+	}
+	return nil
+}
+
+// applyDiscovery appends every repository found under the discovery roots that
+// isn't already configured by hand. Manual [[project]] entries are validated
+// first and keep their names, so discovery can only add, never override.
+func (c *Config) applyDiscovery(takenNames map[string]bool) error {
+	if len(c.Discovery.Roots) == 0 {
+		return nil
+	}
+	if c.Discovery.MaxDepth <= 0 {
+		c.Discovery.MaxDepth = 2
+	}
+
+	roots := make([]string, 0, len(c.Discovery.Roots))
+	for _, r := range c.Discovery.Roots {
+		abs, err := ExpandPath(r)
+		if err != nil {
+			return fmt.Errorf("discovery root %q: %w", r, err)
+		}
+		fi, err := os.Stat(abs)
+		if err != nil {
+			return fmt.Errorf("discovery root %q: %w", r, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("discovery root %q: not a directory", r)
+		}
+		roots = append(roots, abs)
+	}
+	c.Discovery.Roots = roots
+
+	takenPaths := make(map[string]bool, len(c.Projects))
+	for _, p := range c.Projects {
+		takenPaths[p.Path] = true
+	}
+	for _, d := range discover.ScanAll(roots, c.Discovery.MaxDepth, takenNames) {
+		if takenPaths[d.Path] {
+			continue // already configured by hand
+		}
+		takenPaths[d.Path] = true
+		c.Projects = append(c.Projects, Project{Name: d.Name, Path: d.Path})
 	}
 	return nil
 }
