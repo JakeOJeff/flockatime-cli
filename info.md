@@ -15,12 +15,13 @@ file *names* leave your machine as fingerprints rather than words.
 
 1. [What a "fingerprint" means here](#1-what-a-fingerprint-means-here)
 2. [Try it in five minutes](#2-try-it-in-five-minutes)
-3. [How it works, step by step](#3-how-it-works-step-by-step)
-4. [Configuration](#4-configuration)
-5. [Commands](#5-commands)
-6. [What it sends](#6-what-it-sends)
-7. [Running the tests](#7-running-the-tests)
-8. [Project layout](#8-project-layout)
+3. [Testing the WakaTime activity gate](#3-testing-the-wakatime-activity-gate)
+4. [How it works, step by step](#4-how-it-works-step-by-step)
+5. [Configuration](#5-configuration)
+6. [Commands](#6-commands)
+7. [What it sends](#7-what-it-sends)
+8. [Running the tests](#8-running-the-tests)
+9. [Project layout](#9-project-layout)
 
 ---
 
@@ -206,7 +207,251 @@ Press `Ctrl+C` in both windows when you're done.
 
 ---
 
-## 3. How it works, step by step
+## 3. Testing the WakaTime activity gate
+
+By default the agent captures every interval, forever. Set `source = "wakatime"`
+and it only captures **while you are actually editing** — it wakes on your first
+heartbeat, snapshots every interval while you work, goes quiet after you stop,
+and wakes again the next time you type.
+
+It does this by reading the modification time of the two files `wakatime-cli`
+rewrites on every heartbeat:
+
+```
+~/.wakatime/wakatime-internal.cfg
+~/.wakatime/offline_heartbeats.bdb
+```
+
+It **only ever `stat`s them.** It never opens them, never writes to them, and
+never talks to the WakaTime or Hackatime API. Nothing it does can delay, alter
+or drop a heartbeat, so your coding time is recorded exactly as it would be if
+this agent weren't installed.
+
+> Both files are watched, not just the first. When the server is unreachable,
+> `wakatime-cli` banks heartbeats in the offline queue instead of sending them.
+> If only `wakatime-internal.cfg` were watched, an outage would look exactly
+> like you walking away from the keyboard.
+
+### The trick: don't wait ten minutes
+
+At the real defaults, going dormant takes `2 × 300s` = **ten minutes** of
+silence. Nobody wants to test that. Two changes make the whole cycle run in
+about a minute:
+
+- **A tiny interval.** `interval_seconds = 10` makes dormancy arrive after 20s.
+- **A fake WakaTime folder.** Point `wakatime_dir` at an empty directory of your
+  own. Now `touch`ing a file in it *is* a heartbeat, and you control the clock
+  instead of your editor. Your real `~/.wakatime` is never touched.
+
+### Step 1 — a throwaway heartbeat folder
+
+```
+mkdir fakewaka
+```
+
+Leave it empty for now. Empty means "no heartbeat ever" — the agent should
+start dormant and stay silent.
+
+> **PowerShell users:** there is no `touch`, and the walkthrough below fakes a
+> heartbeat four times. Define this once now and use `beat` wherever the steps
+> say `touch fakewaka/wakatime-internal.cfg`:
+>
+> ```powershell
+> function beat {
+>   $f = 'fakewaka\wakatime-internal.cfg'
+>   if (-not (Test-Path $f)) { New-Item -ItemType File $f | Out-Null }
+>   (Get-Item $f).LastWriteTime = Get-Date
+> }
+> ```
+>
+> It has to handle both jobs `touch` does: **create** the file the first time,
+> and **bump the modification time** every time after. Don't reach for
+> `New-Item -Force` as a shortcut — on an existing file it truncates rather
+> than touching it. Only the timestamp matters here; the agent never reads a
+> byte of this file.
+
+### Step 2 — a fast config
+
+Save this as `loop.toml`, adjusting the two paths:
+
+```toml
+endpoint = "http://127.0.0.1:8787"
+api_key = "demo-key-abcd1234"
+interval_seconds = 10
+queue_path = "./loop-queue.db"
+
+[activity]
+source          = "wakatime"
+idle_multiplier = 2            # dormant after 2 x 10s = 20s of silence
+poll_seconds    = 2            # check for a heartbeat every 2s
+wakatime_dir    = "./fakewaka"
+
+[[project]]
+name = "demo"
+path = "C:/Users/you/some-project"
+```
+
+`poll_seconds` is how often it checks *whether* to capture — cheap, one `stat`.
+`interval_seconds` is how often it actually captures. They're separate on
+purpose: a small poll means you get picked up seconds after returning, without
+paying for a folder walk every two seconds.
+
+### Step 3 — start the server and the agent
+
+Terminal 1:
+
+```
+./snapshot-agent devserver
+```
+
+Terminal 2:
+
+```
+SNAPSHOT_AGENT_CONFIG=./loop.toml ./snapshot-agent run
+```
+
+It should announce itself and then **go quiet**:
+
+```
+activity: wakatime heartbeats in C:\Users\you\demo\fakewaka --- dormant after 20s quiet, checked every 2s
+dormant --- no activity in the last 20s; waiting for a heartbeat
+```
+
+Terminal 1 stays empty. This is the whole point: a machine that's logged in but
+not being coded on sends nothing at all.
+
+### Step 4 — fake a heartbeat
+
+In a third terminal (or terminal 2 after `Ctrl+C`-ing nothing — just open a new
+one):
+
+```
+touch fakewaka/wakatime-internal.cfg
+```
+
+```powershell
+beat
+```
+
+Within `poll_seconds`, terminal 2 wakes up and captures **immediately** rather
+than waiting for the next interval:
+
+```
+waking --- activity detected
+project "demo": 4 files, 10 lines, tree cb394448320e
+sent 1 snapshot(s)
+```
+
+That immediacy matters. If it waited for the next tick, every session would
+begin with up to a full interval of missing history.
+
+### Step 5 — keep "coding"
+
+Run that `touch` every few seconds:
+
+```
+for i in 1 2 3 4 5 6 7 8; do touch fakewaka/wakatime-internal.cfg; sleep 3; done
+```
+
+```powershell
+1..8 | ForEach-Object { beat; Start-Sleep -Seconds 3 }
+```
+
+Terminal 2 now snapshots every 10 seconds, exactly as it would with the gate
+turned off. Heartbeats keep it awake; they don't trigger individual snapshots.
+
+### Step 6 — walk away
+
+Stop touching the file and watch. Two more snapshots arrive — at +10s and +20s
+— and then:
+
+```
+going dormant --- no activity for 20s
+project "demo": unchanged (4 files)
+sent 1 snapshot(s)
+```
+
+Then silence, indefinitely.
+
+Those two trailing snapshots are **not a bug.** A 2× idle window means the
+agent stays awake for two full intervals after your last keystroke, so the tail
+end of a session is recorded rather than cut off mid-thought. The final one,
+sent as it goes dormant, is a deliberate end-of-session marker: your collector
+sees a clean close instead of a log that simply stops.
+
+### Step 7 — come back
+
+```
+touch fakewaka/wakatime-internal.cfg
+```
+
+```powershell
+beat
+```
+
+Within `poll_seconds`, `waking --- activity detected` again. The cycle is a
+loop, not a one-shot.
+
+### The whole thing, on one clock
+
+Here is a real run at `interval_seconds = 10`, so `idle_after` is 20s:
+
+```
+[20:33:02] dormant --- no activity in the last 20s; waiting for a heartbeat
+             (18 seconds of complete silence)
+[20:33:18] * first heartbeat
+[20:33:20] waking --- activity detected          <- 2s later, one poll
+[20:33:20] 4 files, tree cb394448320e -> sent
+[20:33:30] sent
+[20:33:40] sent                                  <- every interval while active
+[20:33:39] * last heartbeat
+[20:33:50] sent                                  <- tail snapshot 1
+[20:34:00] going dormant --- no activity for 20s <- tail snapshot 2, then quiet
+[20:34:10] * heartbeat
+[20:34:12] waking --- activity detected          <- 2s later
+```
+
+### Checking it against your real WakaTime
+
+`doctor` reads the real files and tells you which state `run` would start in —
+without sending anything, and without modifying a single byte of WakaTime state:
+
+```
+SNAPSHOT_AGENT_CONFIG=./agent.toml ./snapshot-agent doctor
+```
+
+```
+activity: wakatime heartbeats in C:\Users\you\.wakatime (dormant after 10m0s quiet)
+          last activity 43m1s ago --- would start dormant
+```
+
+Type something in your editor, wait for your plugin to send a heartbeat
+(`heartbeat_rate_limit_seconds` in `~/.wakatime.cfg` controls how often — 30 to
+120 seconds is typical), then run `doctor` again. It should flip to:
+
+```
+          last activity 12s ago --- would start ACTIVE
+```
+
+If it stays dormant while you're clearly typing, check in this order:
+
+| Symptom | Likely cause |
+|---|---|
+| `activity: INVALID --- ...no such file` | `wakatime_dir` is wrong, or WakaTime was never installed |
+| `no activity signal found` | The folder exists but holds neither heartbeat file — your plugin hasn't run yet |
+| `last activity` never advances | Your editor plugin isn't firing at all; test it independently of this agent |
+| Flips to dormant mid-session | `idle_multiplier × interval_seconds` is shorter than your natural pauses — raise the multiplier |
+
+### Turning the gate off
+
+Delete the `[activity]` block, or set `source = "always"`. The agent goes back
+to capturing every interval regardless of what you're doing — which is the
+right choice on a build server, where nobody is typing but you still want a
+record.
+
+---
+
+## 4. How it works, step by step
 
 What follows is everything the program does, in the order it does it.
 
@@ -325,7 +570,7 @@ being dropped.
 
 ---
 
-## 4. Configuration
+## 5. Configuration
 
 Location: `~/.snapshot-agent.toml`, or the path in `SNAPSHOT_AGENT_CONFIG`.
 Must not be readable by anyone but you (`chmod 600`).
@@ -343,6 +588,18 @@ interval_seconds = 300
 # Where undelivered snapshots wait. Default ~/.snapshot-agent-queue.db
 queue_path = "~/.snapshot-agent-queue.db"
 
+# Optional. Omit this whole block and the agent captures every interval,
+# forever, regardless of whether anyone is at the keyboard.
+#
+# source = "wakatime" gates capture on editor activity, read from the files
+# wakatime-cli rewrites on each heartbeat. Read-only: it cannot affect your
+# WakaTime or Hackatime data. See section 3.
+[activity]
+source          = "wakatime"   # "wakatime" or "always" (default)
+idle_multiplier = 2            # dormant after 2 x interval_seconds of silence
+poll_seconds    = 30           # how often to check for a heartbeat
+wakatime_dir    = "~/.wakatime"
+
 # One block per folder you want tracked. Repeat as needed.
 [[project]]
 name = "strict"
@@ -355,20 +612,20 @@ path = "D:/products/flockatime"
 
 ---
 
-## 5. Commands
+## 6. Commands
 
 | Command | What it does |
 |---|---|
 | `snapshot-agent once` | Capture every configured project once, print the JSON, **send nothing**. |
 | `snapshot-agent once <dir>` | Same, for one folder, ignoring the config entirely. The fastest way to see what would be sent. |
-| `snapshot-agent run` | The daemon: capture every interval, send, queue on failure. `Ctrl+C` stops it cleanly. |
-| `snapshot-agent doctor` | Check the config, probe the endpoint, print each project's resolved path and file count, and report how many snapshots are waiting in the queue. Sends nothing. |
+| `snapshot-agent run` | The daemon: capture every interval, send, queue on failure. With `[activity]` set to `wakatime`, it captures only while you're editing and goes dormant otherwise. `Ctrl+C` stops it cleanly. |
+| `snapshot-agent doctor` | Check the config, probe the endpoint, print each project's resolved path and file count, report how many snapshots are waiting in the queue, and say which activity state `run` would start in. Sends nothing. |
 | `snapshot-agent devserver [port]` | A local endpoint that prints what it receives and stores nothing. For trying the agent out. |
 | `snapshot-agent version` | Print the version. |
 
 ---
 
-## 6. What it sends
+## 7. What it sends
 
 ```json
 [{
@@ -396,7 +653,7 @@ the commit hash.
 
 ---
 
-## 7. Running the tests
+## 8. Running the tests
 
 ```
 go test ./...
@@ -417,13 +674,18 @@ The suite covers the behaviours that would be easiest to get quietly wrong:
 - **The queue flushes oldest-first**, doesn't delete anything until the server
   accepts it, removes only the part that was actually sent, preserves
   `captured_at` across the outage, and drops the oldest entries at 5,000.
+- **The activity gate reads the newest heartbeat file**, counts a heartbeat
+  banked in WakaTime's offline queue as activity (so a WakaTime outage isn't
+  mistaken for you leaving), treats an unreadable or missing signal as idle
+  rather than as "always awake", and wakes on the exact idle boundary but not
+  one second past it.
 
 `go test -short ./...` skips the 5,000-entry queue test, which takes a few
 seconds.
 
 ---
 
-## 8. Project layout
+## 9. Project layout
 
 ```
 .
@@ -432,6 +694,7 @@ seconds.
 ├── devserver.go                the throwaway local endpoint
 └── internal/
     ├── config/config.go        TOML config, permission check, path expansion
+    ├── activity/activity.go    when to capture: WakaTime heartbeats, or always
     ├── snapshot/
     │   ├── snapshot.go         payload types, tree hash, capture
     │   ├── walk.go             tree walk, .gitignore, skip lists, size cap
