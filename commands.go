@@ -13,7 +13,6 @@ import (
 
 	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/config"
-	"snapshot-agent/internal/discover"
 	"snapshot-agent/internal/queue"
 	"snapshot-agent/internal/snapshot"
 	"snapshot-agent/internal/transport"
@@ -30,7 +29,9 @@ var errReported = errors.New("already reported")
 // a directory argument it skips the config entirely, which is the quickest way
 // to see exactly what the agent would send.
 func cmdOnce(args []string) error {
-	var snaps []snapshot.Snapshot
+	// Not nil: an empty capture must encode as [], not null, so a consumer
+	// piping this into jq gets an array either way.
+	snaps := []snapshot.Snapshot{}
 
 	if len(args) > 0 {
 		dir, err := config.ExpandPath(args[0])
@@ -51,7 +52,13 @@ func cmdOnce(args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, p := range cfg.Projects {
+		// Resolve projects the same way `run` does, so `once` shows what
+		// would actually be sent rather than only what was pinned by hand.
+		src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+		if err != nil {
+			return err
+		}
+		for _, p := range activeProjects(cfg, src, time.Now().Add(-cfg.IdleAfter())) {
 			s, err := snapshot.Capture(p.Name, p.Path, agentVersion)
 			if err != nil {
 				return fmt.Errorf("project %q: %w", p.Name, err)
@@ -94,8 +101,11 @@ func cmdRun(args []string) error {
 	idleAfter := cfg.IdleAfter()
 	poll := time.Duration(cfg.Activity.PollSeconds) * time.Second
 
-	logf("watching %d project(s), every %s, endpoint %s", len(cfg.Projects), interval, cfg.Endpoint)
+	logf("capturing every %s, endpoint %s", interval, cfg.Endpoint)
 	logf("activity: %s --- dormant after %s quiet, checked every %s", src.Describe(), idleAfter, poll)
+	if len(cfg.Projects) > 0 {
+		logf("%d project(s) pinned in the config; others come from WakaTime", len(cfg.Projects))
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -108,12 +118,24 @@ func cmdRun(args []string) error {
 	captureT := time.NewTicker(interval)
 	defer captureT.Stop()
 
+	// capture resolves which projects are live right now and snapshots them.
+	// The list is rebuilt every time rather than fixed at startup, so opening
+	// a project WakaTime has never seen before needs no restart and no config.
+	capture := func() {
+		projects := activeProjects(cfg, src, time.Now().Add(-idleAfter))
+		if len(projects) == 0 {
+			logf("nothing to capture --- WakaTime has not reported a file in a repository recently")
+			return
+		}
+		tick(projects, client, q, lastHash)
+	}
+
 	// Start in whatever state the machine is already in: joining a session
 	// already in progress captures at once, a quiet machine stays silent
 	// until the first heartbeat.
 	active := activity.Active(src, idleAfter, time.Now())
 	if active {
-		tick(cfg, client, q, lastHash)
+		capture()
 	} else {
 		logf("dormant --- no activity in the last %s; waiting for a heartbeat", idleAfter)
 	}
@@ -125,24 +147,20 @@ func cmdRun(args []string) error {
 			case on && !active:
 				active = true
 				logf("waking --- activity detected")
-				// Re-scan on the way up: a repository cloned since the last
-				// session is exactly what someone means by "I opened a new
-				// project", and it should not need a restart to be seen.
-				rediscover(cfg)
 				// Capture immediately: waiting for the next capture tick
 				// would lose the first interval of the session.
-				tick(cfg, client, q, lastHash)
+				capture()
 				captureT.Reset(interval)
 			case !on && active:
 				// A last snapshot marks the end of the session, so the
 				// collector sees a close rather than a silent gap.
 				active = false
 				logf("going dormant --- no activity for %s", idleAfter)
-				tick(cfg, client, q, lastHash)
+				capture()
 			}
 		case <-captureT.C:
 			if active {
-				tick(cfg, client, q, lastHash)
+				capture()
 			}
 		case <-stop:
 			logf("shutting down")
@@ -151,35 +169,40 @@ func cmdRun(args []string) error {
 	}
 }
 
-// rediscover adds repositories that have appeared under the discovery roots
-// since the last scan. It only ever adds: a project that has gone away keeps
-// failing its capture and saying so, rather than vanishing silently.
-func rediscover(cfg *config.Config) {
-	if len(cfg.Discovery.Roots) == 0 {
-		return
+// activeProjects is what the agent captures on a given tick: the projects
+// WakaTime saw edits in recently, plus any listed by hand in the config.
+//
+// Nothing is scanned for. WakaTime already resolved which file you are in, so
+// the agent snapshots that repository and no others --- which is why there is
+// no root to configure and no cost that scales with how many checkouts you
+// happen to own.
+func activeProjects(cfg *config.Config, src activity.Source, since time.Time) []config.Project {
+	out := append([]config.Project{}, cfg.Projects...)
+
+	w, ok := src.(activity.WakaTime)
+	if !ok {
+		return out
 	}
-	names := make(map[string]bool, len(cfg.Projects))
-	paths := make(map[string]bool, len(cfg.Projects))
-	for _, p := range cfg.Projects {
-		names[p.Name] = true
-		paths[p.Path] = true
+	seen := make(map[string]bool, len(out))
+	for _, p := range out {
+		seen[p.Path] = true
 	}
-	for _, d := range discover.ScanAll(cfg.Discovery.Roots, cfg.Discovery.MaxDepth, names) {
-		if paths[d.Path] {
-			continue
+	for _, p := range w.RecentProjects(since) {
+		if seen[p.Path] {
+			continue // already listed by hand; the manual name wins
 		}
-		paths[d.Path] = true
-		cfg.Projects = append(cfg.Projects, config.Project{Name: d.Name, Path: d.Path})
-		logf("discovered new project %q", d.Name)
+		seen[p.Path] = true
+		out = append(out, config.Project{Name: p.Name, Path: p.Path})
 	}
+	return out
 }
 
 // tick captures every project once, then sends the backlog and this round in a
 // single request. Anything that fails to leave the machine lands in the queue.
-func tick(cfg *config.Config, client *transport.Client, q *queue.Queue, lastHash map[string]string) {
-	fresh := make([]snapshot.Snapshot, 0, len(cfg.Projects))
+func tick(projects []config.Project, client *transport.Client, q *queue.Queue, lastHash map[string]string) {
+	fresh := make([]snapshot.Snapshot, 0, len(projects))
 
-	for _, p := range cfg.Projects {
+	for _, p := range projects {
 		s, err := snapshot.Capture(p.Name, p.Path, agentVersion)
 		if err != nil {
 			logf("project %q: capture failed: %v", p.Name, err)
@@ -251,7 +274,6 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("api_key:  %s\n", mask(cfg.APIKey))
 
 	printActivity(cfg)
-	printDiscovery(cfg)
 
 	client := transport.New(cfg.Endpoint, cfg.APIKey)
 	if err := client.Reachable(); err != nil {
@@ -268,8 +290,18 @@ func cmdDoctor(args []string) error {
 		fmt.Printf("queue:    unavailable --- %v\n", err)
 	}
 
-	fmt.Printf("\nprojects:\n")
-	for _, p := range cfg.Projects {
+	src, _ := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+	projects := cfg.Projects
+	if src != nil {
+		projects = activeProjects(cfg, src, time.Now().Add(-cfg.IdleAfter()))
+	}
+
+	fmt.Printf("\nprojects (%d pinned, %d from WakaTime):\n",
+		len(cfg.Projects), len(projects)-len(cfg.Projects))
+	if len(projects) == 0 {
+		printNoProjectsHelp(cfg)
+	}
+	for _, p := range projects {
 		s, err := snapshot.Capture(p.Name, p.Path, agentVersion)
 		if err != nil {
 			fmt.Printf("  %-16s %s\n      ERROR %v\n", p.Name, p.Path, err)
@@ -312,31 +344,23 @@ func printActivity(cfg *config.Config) {
 		time.Since(last).Round(time.Second), state)
 }
 
-// wideScan is the point past which a discovery root is more likely to be a
-// mistake than an intention. Every repository found is walked and hashed on
-// every tick, so a root pointed at a whole drive is quietly expensive.
-const wideScan = 20
-
-// printDiscovery reports what the scan found and how long it took, so a root
-// that is too broad shows up here rather than as a hot fan six months later.
-func printDiscovery(cfg *config.Config) {
-	if len(cfg.Discovery.Roots) == 0 {
+// printNoProjectsHelp explains an empty project list. Almost always the cause
+// is that wakatime-cli logs only errors until `debug = true` is set, so there
+// is nothing in the log to learn a project from.
+func printNoProjectsHelp(cfg *config.Config) {
+	if cfg.Activity.Source != "wakatime" {
+		fmt.Printf("  none --- add a [[project]] entry, or set [activity] source = \"wakatime\"\n")
 		return
 	}
-	start := time.Now()
-	found := discover.ScanAll(cfg.Discovery.Roots, cfg.Discovery.MaxDepth, nil)
-	elapsed := time.Since(start).Round(time.Millisecond)
-
-	fmt.Printf("discovery: %d root(s), max_depth %d --- %d repo(s) in %s\n",
-		len(cfg.Discovery.Roots), cfg.Discovery.MaxDepth, len(found), elapsed)
-	for _, r := range cfg.Discovery.Roots {
-		fmt.Printf("          %s\n", r)
-	}
-	if len(found) > wideScan {
-		fmt.Printf("          WARNING: %d repositories is a lot to hash every %ds.\n",
-			len(found), cfg.IntervalSeconds)
-		fmt.Printf("          Narrow `roots`, or lower `max_depth`, unless you mean it.\n")
-	}
+	log := filepath.Join(cfg.Activity.WakaTimeDir, "wakatime.log")
+	fmt.Printf("  none yet.\n\n")
+	fmt.Printf("  Projects are read from %s, which\n", log)
+	fmt.Printf("  only records the file you are editing when debug logging is on.\n\n")
+	fmt.Printf("  Add this to ~/.wakatime.cfg under [settings]:\n\n")
+	fmt.Printf("      debug = true\n\n")
+	fmt.Printf("  Then edit a file in a git repository and run doctor again. This\n")
+	fmt.Printf("  changes only what WakaTime writes locally --- your heartbeats and\n")
+	fmt.Printf("  your dashboard are unaffected.\n")
 }
 
 func logf(format string, args ...any) {

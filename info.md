@@ -501,64 +501,73 @@ already running are left alone.
 
 ### Stop listing projects by hand
 
-Point `[discovery]` at the folders your work lives in and every git repository
-underneath becomes a project:
+You don't configure projects. WakaTime already knows which file you're editing,
+so the agent reads that and snapshots the repository the file is in:
 
 ```toml
-[discovery]
-roots     = ["D:/products"]
-max_depth = 2
+[activity]
+source = "wakatime"
 ```
 
-With that, no `[[project]]` entries are needed at all:
+That's the whole configuration. No roots, no folder scanning, no `[[project]]`
+entries. Open any repository on any drive and it's tracked; the agent has never
+heard of it and doesn't need to.
 
 ```
-discovery: 1 root(s), max_depth 2 --- 3 repo(s) in 1ms
-          D:\products
-
-projects:
-  flockatime       D:\products\flockatime
-  flockatime-cli   D:\products\flockatime-cli
+projects (0 pinned, 2 from WakaTime):
   nomeadow         D:\products\nomeadow
+      72 files, 23797 lines, tree 6a0f60311a6d, master @ 31d85c70d5ca (dirty)
+  flockatime-cli   D:\products\flockatime-cli
+      29 files, 3653 lines, tree f8678354d9c9, main @ bc597d0c820c (dirty)
 ```
 
-`nomeadow` was never configured. It was found.
+Both of those were found because they were edited. Neither was configured.
 
-A repository is never descended into, so a submodule reports as part of its
-parent rather than as a project of its own. `node_modules`, `vendor`, `target`,
-`dist`, `build`, and dotted folders are skipped, which is most of what makes a
-naive scan slow. Two checkouts that share a folder name get disambiguated by
-their parent (`work-api` and `personal-api`) rather than colliding, and a name
-already used by a `[[project]]` entry is never taken — manual entries always
-win.
+This is also why the cost doesn't grow with how much code you own. The agent
+snapshots the repository you're **in**, not every repository it can find — so
+having 77 checkouts on a drive costs exactly the same as having one.
 
-The roots are re-scanned every time the agent wakes, so cloning something new
-and starting work on it is enough. No restart.
+`[[project]]` entries still work if you want something watched whether or not
+you touch it, and a pinned entry always wins over a detected one with the same
+path.
 
-### Scan narrowly
+### The one thing to turn on
 
-**This is the setting to get right.** Every repository found is walked and
-hashed on *every tick*. On the machine this was written on:
+Projects come from `~/.wakatime/wakatime.log`, and `wakatime-cli` only records
+the file you're editing when debug logging is on. Add this to `~/.wakatime.cfg`
+under `[settings]`:
 
-| Root | Repos | Cost per tick |
-|---|---|---|
-| `D:/products` | 3 | negligible |
-| `D:/Projects` | 73 | ~20s of solid CPU |
-
-The second one is not a config, it's a space heater. `doctor` tells you before
-you find out the hard way:
-
-```
-discovery: 1 root(s), max_depth 2 --- 73 repo(s) in 3ms
-          D:\Projects
-          WARNING: 73 repositories is a lot to hash every 300s.
-          Narrow `roots`, or lower `max_depth`, unless you mean it.
+```ini
+debug = true
 ```
 
-Note how fast *finding* them is (3ms) compared to hashing them. Discovery is
-cheap; what discovery signs you up for is not.
+That changes only what WakaTime writes **locally**. Heartbeats, your coding
+time, and your dashboard are all unaffected — the agent reads the file and
+never writes to it. The cost is a busier log: roughly five lines per heartbeat.
+
+`doctor` tells you when this is the problem rather than leaving you guessing:
+
+```
+projects (0 pinned, 0 from WakaTime):
+  none yet.
+
+  Projects are read from C:\Users\you\.wakatime\wakatime.log, which
+  only records the file you are editing when debug logging is on.
+
+  Add this to ~/.wakatime.cfg under [settings]:
+
+      debug = true
+```
+
+> **A repository at your home directory is never treated as a project.** Keeping
+> dotfiles in a repo at `~` is common, and without that rule, editing any loose
+> file — a download, a scratch note — would resolve to your home directory and
+> set the agent walking and hashing everything you own. Repositories *nested*
+> under home are tracked normally.
 
 ### The whole zero-touch setup
+
+The entire config:
 
 ```toml
 endpoint = "https://collect.example.com"
@@ -566,21 +575,21 @@ api_key  = "..."
 
 [activity]
 source = "wakatime"
-
-[discovery]
-roots = ["D:/products"]
 ```
 
-Then once:
+Plus `debug = true` in `~/.wakatime.cfg`, and once:
 
 ```
 snapshot-agent install
 ```
 
 From then on: log in, open a project, start typing. The agent wakes on your
-first heartbeat, finds the repository you're in whether or not it existed last
-week, snapshots it every five minutes while you work, and goes quiet ten
-minutes after you stop.
+first heartbeat, snapshots whichever repository you're in — one it has never
+seen before is no different from one you use daily — every five minutes while
+you work, and goes quiet ten minutes after you stop.
+
+Everything about *when* and *what* comes from WakaTime. The only thing this
+agent adds is the snapshot itself, and sending it somewhere else.
 
 ---
 
@@ -809,10 +818,11 @@ The suite covers the behaviours that would be easiest to get quietly wrong:
 - **The queue flushes oldest-first**, doesn't delete anything until the server
   accepts it, removes only the part that was actually sent, preserves
   `captured_at` across the outage, and drops the oldest entries at 5,000.
-- **Discovery finds repositories** at the configured depth, never descends into
-  one (so a submodule is not a project), skips heavy and hidden folders,
-  disambiguates two checkouts that share a name, refuses a name already used by
-  a manual entry, and reports a repo reachable from two roots only once.
+- **Project detection** resolves an edited file to its repository root, collapses
+  many files in one repo to a single project, ignores heartbeats older than the
+  idle window, skips files outside any repository, reads only the tail of a long
+  log, and **never treats the home directory as a project** even when it is a
+  git repo.
 - **The activity gate reads the newest heartbeat file**, counts a heartbeat
   banked in WakaTime's offline queue as activity (so a WakaTime outage isn't
   mistaken for you leaving), treats an unreadable or missing signal as idle
@@ -835,7 +845,7 @@ seconds.
 └── internal/
     ├── config/config.go        TOML config, permission check, path expansion
     ├── activity/activity.go    when to capture: WakaTime heartbeats, or always
-    ├── discover/discover.go    what to capture: repos found under the roots
+    ├── activity/projects.go    what to capture: the repo WakaTime saw you edit
     ├── snapshot/
     │   ├── snapshot.go         payload types, tree hash, capture
     │   ├── walk.go             tree walk, .gitignore, skip lists, size cap
