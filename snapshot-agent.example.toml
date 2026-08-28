@@ -11,3 +11,17 @@ queue_path = "~/.snapshot-agent-queue.db"
 [[project]]
 name = "flockatime"
 path = "D:/products/flockatime"
+
+# When to capture at all. Omit this section and the agent captures every
+# interval forever (source = "always").
+#
+# source = "wakatime" reads the files wakatime-cli rewrites on every heartbeat
+# flush --- it only ever stats them, so it cannot delay or drop a heartbeat.
+# The agent wakes on the first heartbeat, captures every interval while you
+# work, and goes dormant once the editor has been quiet for
+# idle_multiplier x interval_seconds. The next heartbeat wakes it again.
+[activity]
+source          = "wakatime"
+idle_multiplier = 2     # dormant after 2 x interval_seconds of quiet
+poll_seconds    = 30    # how often to check for a heartbeat
+wakatime_dir    = "~/.wakatime"

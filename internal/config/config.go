@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -26,7 +27,18 @@ type Config struct {
 	APIKey          string    `toml:"api_key"`
 	IntervalSeconds int       `toml:"interval_seconds"`
 	QueuePath       string    `toml:"queue_path"`
+	Activity        Activity  `toml:"activity"`
 	Projects        []Project `toml:"project"`
+}
+
+// Activity controls when the daemon captures at all. With the default source
+// it captures every interval forever; with "wakatime" it goes dormant once the
+// editor has been quiet for IdleMultiplier intervals.
+type Activity struct {
+	Source         string `toml:"source"`
+	IdleMultiplier int    `toml:"idle_multiplier"`
+	PollSeconds    int    `toml:"poll_seconds"`
+	WakaTimeDir    string `toml:"wakatime_dir"`
 }
 
 // Project is one watched directory.
@@ -79,6 +91,9 @@ func (c *Config) Validate(requireEndpoint bool) error {
 		}
 		c.QueuePath = qp
 	}
+	if err := c.Activity.applyDefaults(c.IntervalSeconds); err != nil {
+		return err
+	}
 	if requireEndpoint {
 		if strings.TrimSpace(c.Endpoint) == "" {
 			return fmt.Errorf("endpoint is required")
@@ -116,6 +131,46 @@ func (c *Config) Validate(requireEndpoint bool) error {
 		p.Path = abs
 	}
 	return nil
+}
+
+// applyDefaults fills in the [activity] section. The default source is
+// "always", so a config written before this section existed keeps its old
+// behaviour of capturing on every tick.
+func (a *Activity) applyDefaults(intervalSeconds int) error {
+	if a.Source == "" {
+		a.Source = "always"
+	}
+	if a.IdleMultiplier <= 0 {
+		a.IdleMultiplier = 2
+	}
+	if a.PollSeconds <= 0 {
+		a.PollSeconds = 30
+	}
+	// Polling slower than the capture interval would delay a wake past the
+	// first snapshot it is meant to trigger.
+	if a.PollSeconds > intervalSeconds {
+		a.PollSeconds = intervalSeconds
+	}
+	if a.WakaTimeDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("locating home directory: %w", err)
+		}
+		a.WakaTimeDir = filepath.Join(home, ".wakatime")
+		return nil
+	}
+	dir, err := ExpandPath(a.WakaTimeDir)
+	if err != nil {
+		return fmt.Errorf("wakatime_dir: %w", err)
+	}
+	a.WakaTimeDir = dir
+	return nil
+}
+
+// IdleAfter is how long the editor may stay quiet before the daemon goes
+// dormant: IdleMultiplier whole capture intervals.
+func (c *Config) IdleAfter() time.Duration {
+	return time.Duration(c.Activity.IdleMultiplier*c.IntervalSeconds) * time.Second
 }
 
 // ExpandPath resolves a leading ~ and returns an absolute path.

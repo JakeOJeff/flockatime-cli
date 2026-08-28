@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/config"
 	"snapshot-agent/internal/queue"
 	"snapshot-agent/internal/snapshot"
@@ -75,6 +76,11 @@ func cmdRun(args []string) error {
 		return err
 	}
 
+	src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+	if err != nil {
+		return err
+	}
+
 	q, err := queue.Open(cfg.QueuePath)
 	if err != nil {
 		return err
@@ -84,19 +90,55 @@ func cmdRun(args []string) error {
 	client := transport.New(cfg.Endpoint, cfg.APIKey)
 	lastHash := make(map[string]string, len(cfg.Projects))
 	interval := time.Duration(cfg.IntervalSeconds) * time.Second
+	idleAfter := cfg.IdleAfter()
+	poll := time.Duration(cfg.Activity.PollSeconds) * time.Second
 
 	logf("watching %d project(s), every %s, endpoint %s", len(cfg.Projects), interval, cfg.Endpoint)
+	logf("activity: %s --- dormant after %s quiet, checked every %s", src.Describe(), idleAfter, poll)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// Two clocks on purpose. The poll only moves the state machine, so a
+	// returning user is picked up within poll rather than within interval;
+	// the capture clock is what actually costs a walk and a request.
+	pollT := time.NewTicker(poll)
+	defer pollT.Stop()
+	captureT := time.NewTicker(interval)
+	defer captureT.Stop()
+
+	// Start in whatever state the machine is already in: joining a session
+	// already in progress captures at once, a quiet machine stays silent
+	// until the first heartbeat.
+	active := activity.Active(src, idleAfter, time.Now())
+	if active {
+		tick(cfg, client, q, lastHash)
+	} else {
+		logf("dormant --- no activity in the last %s; waiting for a heartbeat", idleAfter)
+	}
 
 	for {
-		tick(cfg, client, q, lastHash)
 		select {
-		case <-ticker.C:
+		case now := <-pollT.C:
+			switch on := activity.Active(src, idleAfter, now); {
+			case on && !active:
+				active = true
+				logf("waking --- activity detected")
+				// Capture immediately: waiting for the next capture tick
+				// would lose the first interval of the session.
+				tick(cfg, client, q, lastHash)
+				captureT.Reset(interval)
+			case !on && active:
+				// A last snapshot marks the end of the session, so the
+				// collector sees a close rather than a silent gap.
+				active = false
+				logf("going dormant --- no activity for %s", idleAfter)
+				tick(cfg, client, q, lastHash)
+			}
+		case <-captureT.C:
+			if active {
+				tick(cfg, client, q, lastHash)
+			}
 		case <-stop:
 			logf("shutting down")
 			return nil
@@ -180,6 +222,8 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("interval: %ds\n", cfg.IntervalSeconds)
 	fmt.Printf("api_key:  %s\n", mask(cfg.APIKey))
 
+	printActivity(cfg)
+
 	client := transport.New(cfg.Endpoint, cfg.APIKey)
 	if err := client.Reachable(); err != nil {
 		fmt.Printf("reach:    UNREACHABLE --- %v\n", err)
@@ -213,6 +257,30 @@ func cmdDoctor(args []string) error {
 			p.Name, p.Path, s.FileCount, s.TotalLines, short(s.TreeHash), git)
 	}
 	return nil
+}
+
+// printActivity reports which state `run` would start in and why --- the
+// first question to ask when the agent is quiet and you expected snapshots.
+func printActivity(cfg *config.Config) {
+	src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+	if err != nil {
+		fmt.Printf("activity: INVALID --- %v\n", err)
+		return
+	}
+	idleAfter := cfg.IdleAfter()
+	fmt.Printf("activity: %s (dormant after %s quiet)\n", src.Describe(), idleAfter)
+
+	last := src.LastActivity()
+	if last.IsZero() {
+		fmt.Printf("          no activity signal found --- would start dormant\n")
+		return
+	}
+	state := "dormant"
+	if activity.Active(src, idleAfter, time.Now()) {
+		state = "ACTIVE"
+	}
+	fmt.Printf("          last activity %s ago --- would start %s\n",
+		time.Since(last).Round(time.Second), state)
 }
 
 func logf(format string, args ...any) {
