@@ -16,7 +16,7 @@ file *names* leave your machine as fingerprints rather than words.
 1. [What a "fingerprint" means here](#1-what-a-fingerprint-means-here)
 2. [Try it in five minutes](#2-try-it-in-five-minutes)
 3. [Testing the WakaTime activity gate](#3-testing-the-wakatime-activity-gate)
-4. [Setting it up so nobody has to run it](#4-setting-it-up-so-nobody-has-to-run-it)
+4. [Setting it up, step by step](#4-setting-it-up-step-by-step)
 5. [How it works, step by step](#5-how-it-works-step-by-step)
 6. [Configuration](#6-configuration)
 7. [Commands](#7-commands)
@@ -211,24 +211,33 @@ Press `Ctrl+C` in both windows when you're done.
 ## 3. Testing the WakaTime activity gate
 
 By default the agent captures every interval, forever. Set `source = "wakatime"`
-and it only captures **while you are actually editing** — it wakes on your first
-heartbeat, snapshots every interval while you work, goes quiet after you stop,
-and wakes again the next time you type.
+and it takes both of its cues from WakaTime instead: it wakes on your first
+heartbeat, snapshots **the project you are editing** every interval while you
+work, goes quiet after you stop, and wakes again the next time you type.
 
-It does this by reading the modification time of the two files `wakatime-cli`
-rewrites on every heartbeat:
+Two signals, from two files:
+
+| Signal | File | Read as |
+|---|---|---|
+| *that* you are working | `wakatime-internal.cfg`, `offline_heartbeats.bdb` | modification time |
+| *which project* | `wakatime.log` | the `"file"` field of each heartbeat |
 
 ```
 ~/.wakatime/wakatime-internal.cfg
 ~/.wakatime/offline_heartbeats.bdb
+~/.wakatime/wakatime.log
 ```
 
-It **only ever `stat`s them.** It never opens them, never writes to them, and
-never talks to the WakaTime or Hackatime API. Nothing it does can delay, alter
+The project half needs `debug = true` in `~/.wakatime.cfg` — without it
+`wakatime-cli` logs only errors, and there is no record of which file you were
+in. The activity half works either way.
+
+It **only ever reads those three files.** It never writes to them, and never
+talks to the WakaTime or Hackatime API. Nothing it does can delay, alter
 or drop a heartbeat, so your coding time is recorded exactly as it would be if
 this agent weren't installed.
 
-> Both files are watched, not just the first. When the server is unreachable,
+> Both *activity* files are watched, not just the first. When the server is unreachable,
 > `wakatime-cli` banks heartbeats in the offline queue instead of sending them.
 > If only `wakatime-internal.cfg` were watched, an outage would look exactly
 > like you walking away from the keyboard.
@@ -253,27 +262,50 @@ mkdir fakewaka
 Leave it empty for now. Empty means "no heartbeat ever" — the agent should
 start dormant and stay silent.
 
-> **PowerShell users:** there is no `touch`, and the walkthrough below fakes a
-> heartbeat four times. Define this once now and use `beat` wherever the steps
-> say `touch fakewaka/wakatime-internal.cfg`:
->
-> ```powershell
-> function beat {
->   $f = 'fakewaka\wakatime-internal.cfg'
->   if (-not (Test-Path $f)) { New-Item -ItemType File $f | Out-Null }
->   (Get-Item $f).LastWriteTime = Get-Date
-> }
-> ```
->
-> It has to handle both jobs `touch` does: **create** the file the first time,
-> and **bump the modification time** every time after. Don't reach for
-> `New-Item -Force` as a shortcut — on an existing file it truncates rather
-> than touching it. Only the timestamp matters here; the agent never reads a
-> byte of this file.
+A real heartbeat tells the agent **two** things, so a fake one has to do both:
+
+| What | Where it comes from | Faked by |
+|---|---|---|
+| *that* you are working | mtime of `wakatime-internal.cfg` | touching the file |
+| *which project* | the `"file"` field in `wakatime.log` | appending a log line |
+
+Touching the timestamp alone wakes the agent with nothing to capture. Define
+this once and use `beat <path-to-a-file-in-a-real-repo>` wherever the steps
+below say to send a heartbeat:
+
+```bash
+beat() {
+  printf '{"level":"debug","file":"%s","time":%s}\n' "$1" "$(date +%s)" >> fakewaka/wakatime.log
+  touch fakewaka/wakatime-internal.cfg
+}
+```
+
+```powershell
+function beat($file) {
+  $t = [int](Get-Date -UFormat %s)
+  $j = '{"level":"debug","file":"' + ($file -replace '\\','/') + '","time":' + $t + '}'
+  Add-Content fakewaka\wakatime.log $j
+  $c = 'fakewaka\wakatime-internal.cfg'
+  if (-not (Test-Path $c)) { New-Item -ItemType File $c | Out-Null }
+  (Get-Item $c).LastWriteTime = Get-Date
+}
+```
+
+The PowerShell version has to do what `touch` does — **create** the file the
+first time, **bump the timestamp** after — because there is no `touch`. Don't
+reach for `New-Item -Force` as a shortcut: on an existing file it truncates
+rather than touching.
+
+Point it at a file inside a **real git repository** on your machine. That is
+what the agent resolves to a project:
+
+```
+beat "D:/products/flockatime-cli/main.go"
+```
 
 ### Step 2 — a fast config
 
-Save this as `loop.toml`, adjusting the two paths:
+Save this as `loop.toml`. Nothing in it needs editing:
 
 ```toml
 endpoint = "http://127.0.0.1:8787"
@@ -286,11 +318,22 @@ source          = "wakatime"
 idle_multiplier = 2            # dormant after 2 x 10s = 20s of silence
 poll_seconds    = 2            # check for a heartbeat every 2s
 wakatime_dir    = "./fakewaka"
-
-[[project]]
-name = "demo"
-path = "C:/Users/you/some-project"
 ```
+
+There are no `[[project]]` entries and that is the point — the projects come
+from whatever file you name when you `beat`.
+
+> **If a devserver is already running on that port**, the second one fails to
+> bind and exits, and your agent quietly sends to the *first* one — so
+> snapshots appear in a terminal you weren't watching while the one you were
+> watching stays empty. The give-away is on stderr:
+>
+> ```
+> listen tcp 127.0.0.1:8787: bind: Only one usage of each socket address ...
+> ```
+>
+> Either stop the old one, or give this run its own port: `devserver 8801`,
+> with a matching `endpoint` in the config.
 
 `poll_seconds` is how often it checks *whether* to capture — cheap, one `stat`.
 `interval_seconds` is how often it actually captures. They're separate on
@@ -327,11 +370,11 @@ In a third terminal (or terminal 2 after `Ctrl+C`-ing nothing — just open a ne
 one):
 
 ```
-touch fakewaka/wakatime-internal.cfg
+beat "D:/products/flockatime-cli/main.go"
 ```
 
 ```powershell
-beat
+beat "D:/products/flockatime-cli/main.go"
 ```
 
 Within `poll_seconds`, terminal 2 wakes up and captures **immediately** rather
@@ -351,11 +394,11 @@ begin with up to a full interval of missing history.
 Run that `touch` every few seconds:
 
 ```
-for i in 1 2 3 4 5 6 7 8; do touch fakewaka/wakatime-internal.cfg; sleep 3; done
+for i in 1 2 3 4 5 6 7 8; do beat "D:/products/flockatime-cli/main.go"; sleep 3; done
 ```
 
 ```powershell
-1..8 | ForEach-Object { beat; Start-Sleep -Seconds 3 }
+1..8 | ForEach-Object { beat "D:/products/flockatime-cli/main.go"; Start-Sleep -Seconds 3 }
 ```
 
 Terminal 2 now snapshots every 10 seconds, exactly as it would with the gate
@@ -383,11 +426,11 @@ sees a clean close instead of a log that simply stops.
 ### Step 7 — come back
 
 ```
-touch fakewaka/wakatime-internal.cfg
+beat "D:/products/flockatime-cli/main.go"
 ```
 
 ```powershell
-beat
+beat "D:/products/flockatime-cli/main.go"
 ```
 
 Within `poll_seconds`, `waking --- activity detected` again. The cycle is a
@@ -452,54 +495,153 @@ record.
 
 ---
 
-## 4. Setting it up so nobody has to run it
+## 4. Setting it up, step by step
 
-Everything so far assumed you type `snapshot-agent run` yourself and list every
-project by hand. Neither is necessary.
+Six steps, once. After them: log in, open a project, type — nothing else, ever.
 
-Worth being honest about the goal. WakaTime isn't magic either — somebody
+Worth being honest about the goal first. WakaTime isn't magic either — somebody
 installed the editor plugin once, and *that* is what runs `wakatime-cli`. The
 target here is the same: **one command, once, then never again.** There is no
 version of this where nothing is ever installed.
 
-### Start at login
+### Step 1 — build the binary somewhere permanent
+
+`install` records the **absolute path** of the binary, so build it somewhere it
+won't move. Not the repo — a `git clean` or a folder rename would silently
+break your autostart.
 
 ```
-snapshot-agent install
+mkdir ~/bin
+cd D:/products/flockatime-cli
+go build -o ~/bin/snapshot-agent.exe .
+```
+
+> Run `go build` **from inside the repo**. Building from elsewhere with a
+> directory argument fails, because Go walks up looking for a module and finds
+> your home directory instead:
+>
+> ```
+> go: cannot find main module, but found .git/config in C:\Users\you
+> ```
+
+### Step 2 — turn on WakaTime debug logging
+
+The agent learns which project you're in from `~/.wakatime/wakatime.log`, and
+`wakatime-cli` only records the edited file when debug logging is on. Open
+`~/.wakatime.cfg` and add one line under `[settings]`:
+
+```ini
+[settings]
+debug = true
+```
+
+This changes only what WakaTime writes **locally**. Heartbeats, your coding
+time, and your dashboard are unaffected — the agent reads that file and never
+writes to it. The cost is a busier log, roughly five lines per heartbeat.
+
+### Step 3 — write the config
+
+Create `~/.snapshot-agent.toml`:
+
+```toml
+endpoint = "https://collect.example.com"
+api_key  = "your-real-key"
+interval_seconds = 300
+
+[activity]
+source = "wakatime"
+```
+
+That is the whole file. No project list, no folder roots — projects come from
+whatever you edit.
+
+> **It must be `~/.snapshot-agent.toml`.** The login item starts the agent with
+> a bare environment, so `SNAPSHOT_AGENT_CONFIG` is ignored. A config anywhere
+> else works when you run the agent by hand and is invisible at login.
+
+On macOS and Linux, also `chmod 600 ~/.snapshot-agent.toml` — the agent refuses
+to start from a config others can read. On Windows the check is skipped, since
+ACLs rather than mode bits are the real control there.
+
+### Step 4 — check it with `doctor`
+
+```
+~/bin/snapshot-agent.exe doctor
+```
+
+Three things to look for:
+
+```
+activity: wakatime heartbeats in C:\Users\you\.wakatime (dormant after 10m0s quiet)
+          last activity 12s ago --- would start ACTIVE
+reach:    ok
+projects (0 pinned, 1 from WakaTime):
+  myproject        D:\code\myproject
+```
+
+- `reach: ok` — the endpoint answered.
+- `would start ACTIVE` — it can see your heartbeats. If it says `dormant`, type
+  in your editor, wait for a heartbeat, and run it again.
+- **a non-zero project count** — it can tell which project you're in. If this is
+  `0 from WakaTime`, `doctor` prints exactly what to fix; usually Step 2 was
+  missed, or you haven't edited a file inside a git repository yet.
+
+`doctor` sends nothing. It only looks.
+
+### Step 5 — start it at every login
+
+```
+~/bin/snapshot-agent.exe install
 ```
 
 ```
 installed: starts at every login, hidden, no Administrator needed
   binary:   C:\Users\you\bin\snapshot-agent.exe
-  login item: C:\Users\you\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\snapshot-agent.vbs
+  login item: C:\Users\you\AppData\Roaming\...\Startup\snapshot-agent.vbs
 ```
 
-On Windows this writes a one-line launcher into your Startup folder. It uses
-the Startup folder rather than a scheduled task on purpose: `schtasks
-/sc onlogon` **requires Administrator**, and a program that watches your own
-folders has no business asking for that. The launcher exists because the agent
-is a console program — started directly it would leave a terminal window open
-for as long as it runs, so the script starts it with the window hidden instead.
+Start it now rather than logging out:
+
+```
+wscript "$APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\snapshot-agent.vbs"
+```
 
 On macOS and Linux, `install` prints the launchd plist or systemd user unit to
-save, because guessing at someone's init system is worse than showing them the
-file.
+save, rather than guessing at your init system.
 
-Undo it at any time:
+### Step 6 — confirm it is actually running
+
+```powershell
+Get-Process snapshot-agent
+```
+
+Then edit a file in a repo, wait one interval, and check your collector
+received a snapshot. There is no local log to read — see the warning below.
+
+### Undoing all of it
 
 ```
-snapshot-agent uninstall
+~/bin/snapshot-agent.exe uninstall
 ```
 
-That removes the login item only. Your config, your queue, and any agent
-already running are left alone.
+That removes the login item only; it leaves your config, your queue, and any
+already-running agent alone. To finish the job:
+
+| To remove | Do this |
+|---|---|
+| the running agent | `Stop-Process -Name snapshot-agent` |
+| the config | delete `~/.snapshot-agent.toml` |
+| the queued backlog | delete `~/.snapshot-agent-queue.db` |
+| WakaTime debug logging | remove `debug = true` from `~/.wakatime.cfg` |
+
+Nothing else was written anywhere. The agent never modified WakaTime's files.
 
 > **A login item has no window, so it has nowhere to print.** If the config is
 > broken, the agent exits at login and you see nothing at all. `install` checks
 > the config first and warns you before that can happen, but if the agent ever
-> seems to be doing nothing, `snapshot-agent doctor` is the thing to run.
+> seems to be doing nothing, `doctor` is the tool.
 
-### Stop listing projects by hand
+### Why there is no project list
 
 You don't configure projects. WakaTime already knows which file you're editing,
 so the agent reads that and snapshots the repository the file is in:
@@ -531,21 +673,11 @@ having 77 checkouts on a drive costs exactly the same as having one.
 you touch it, and a pinned entry always wins over a detected one with the same
 path.
 
-### The one thing to turn on
+### When no project is detected
 
-Projects come from `~/.wakatime/wakatime.log`, and `wakatime-cli` only records
-the file you're editing when debug logging is on. Add this to `~/.wakatime.cfg`
-under `[settings]`:
-
-```ini
-debug = true
-```
-
-That changes only what WakaTime writes **locally**. Heartbeats, your coding
-time, and your dashboard are all unaffected — the agent reads the file and
-never writes to it. The cost is a busier log: roughly five lines per heartbeat.
-
-`doctor` tells you when this is the problem rather than leaving you guessing:
+Almost always this means Step 2 was skipped — without `debug = true`,
+`wakatime-cli` logs only errors and there is no record of the file you were in.
+`doctor` says so rather than leaving you guessing:
 
 ```
 projects (0 pinned, 0 from WakaTime):
@@ -565,27 +697,14 @@ projects (0 pinned, 0 from WakaTime):
 > set the agent walking and hashing everything you own. Repositories *nested*
 > under home are tracked normally.
 
-### The whole zero-touch setup
+### What you end up with
 
-The entire config:
+Six steps, and the sum of them is: one line added to `~/.wakatime.cfg`, a
+six-line config file, and a login item.
 
-```toml
-endpoint = "https://collect.example.com"
-api_key  = "..."
-
-[activity]
-source = "wakatime"
-```
-
-Plus `debug = true` in `~/.wakatime.cfg`, and once:
-
-```
-snapshot-agent install
-```
-
-From then on: log in, open a project, start typing. The agent wakes on your
-first heartbeat, snapshots whichever repository you're in — one it has never
-seen before is no different from one you use daily — every five minutes while
+From then on — log in, open a project, start typing. The agent wakes on your
+first heartbeat, snapshots whichever repository you're in (one it has never
+seen before is no different from one you use daily) every five minutes while
 you work, and goes quiet ten minutes after you stop.
 
 Everything about *when* and *what* comes from WakaTime. The only thing this

@@ -118,15 +118,25 @@ func cmdRun(args []string) error {
 	captureT := time.NewTicker(interval)
 	defer captureT.Stop()
 
+	// lastProjects is what the previous capture covered. Going dormant happens
+	// exactly when the newest heartbeat ages past idleAfter, so a fresh lookup
+	// at that instant finds nothing --- the closing snapshot has to be taken
+	// against the projects the session was actually spent in.
+	var lastProjects []config.Project
+
 	// capture resolves which projects are live right now and snapshots them.
 	// The list is rebuilt every time rather than fixed at startup, so opening
 	// a project WakaTime has never seen before needs no restart and no config.
-	capture := func() {
+	capture := func(closing bool) {
 		projects := activeProjects(cfg, src, time.Now().Add(-idleAfter))
+		if len(projects) == 0 && closing {
+			projects = lastProjects
+		}
 		if len(projects) == 0 {
 			logf("nothing to capture --- WakaTime has not reported a file in a repository recently")
 			return
 		}
+		lastProjects = projects
 		tick(projects, client, q, lastHash)
 	}
 
@@ -135,7 +145,7 @@ func cmdRun(args []string) error {
 	// until the first heartbeat.
 	active := activity.Active(src, idleAfter, time.Now())
 	if active {
-		capture()
+		capture(false)
 	} else {
 		logf("dormant --- no activity in the last %s; waiting for a heartbeat", idleAfter)
 	}
@@ -149,18 +159,18 @@ func cmdRun(args []string) error {
 				logf("waking --- activity detected")
 				// Capture immediately: waiting for the next capture tick
 				// would lose the first interval of the session.
-				capture()
+				capture(false)
 				captureT.Reset(interval)
 			case !on && active:
 				// A last snapshot marks the end of the session, so the
 				// collector sees a close rather than a silent gap.
 				active = false
 				logf("going dormant --- no activity for %s", idleAfter)
-				capture()
+				capture(true)
 			}
 		case <-captureT.C:
 			if active {
-				capture()
+				capture(false)
 			}
 		case <-stop:
 			logf("shutting down")
