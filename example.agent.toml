@@ -1,0 +1,14 @@
+endpoint = "http://127.0.0.1:8787"
+api_key = "demo-key-abcd1234"
+interval_seconds = 10
+queue_path = "./loop-queue.db"
+
+[activity]
+source          = "wakatime"
+idle_multiplier = 2            # dormant after 2 x 10s = 20s of silence
+poll_seconds    = 2            # check for a heartbeat every 2s
+wakatime_dir    = "./temp"
+
+[[project]]
+name = "flockatime"
+path = "D:/products/flockatime-cli"

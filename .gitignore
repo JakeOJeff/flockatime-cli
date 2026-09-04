@@ -11,3 +11,4 @@
 *.db
 *.bolt
 .snapshot-agent.toml
+/agent.toml

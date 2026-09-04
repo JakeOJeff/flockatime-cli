@@ -67,13 +67,15 @@ path = "C:/Users/you/some-project"
 And in another terminal:
 
 ```
+  $env:SNAPSHOT_AGENT_CONFIG = "./agent.toml"; ./snapshot-agent.exe run # on windows
 SNAPSHOT_AGENT_CONFIG=./loop.toml ./snapshot-agent run
 ```
 
 ```
 project "demo": 28 files, 3800 lines, tree f397336f865d
-sent 1 snapshot(s)
+sent 1 snapshot(s) 
 ```
+added thing 
 
 Edit a file and the tree hash moves. Change nothing and it sends a 319-byte
 `unchanged` marker instead of the 6 KB file list. Kill the devserver and
