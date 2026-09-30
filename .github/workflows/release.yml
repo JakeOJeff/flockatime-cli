@@ -68,14 +68,16 @@ jobs:
             goos="${t%/*}"; goarch="${t#*/}"
             name="snapshot-agent"
             [ "$goos" = "windows" ] && name="snapshot-agent.exe"
-            outdir="build/snapshot-agent_${version}_${goos}_${goarch}"
+            # No version in the name, so releases/latest/download/<name> always
+            # resolves to the newest build --- the install scripts rely on it.
+            outdir="build/snapshot-agent_${goos}_${goarch}"
             mkdir -p "$outdir"
             echo "--> $goos/$goarch"
             GOOS="$goos" GOARCH="$goarch" go build \
               -trimpath \
               -ldflags "-s -w -X main.agentVersion=${version}" \
               -o "$outdir/$name" .
-            cp readme.md snapshot-agent.example.toml "$outdir/"
+            cp README.md snapshot-agent.example.toml "$outdir/"
             if [ "$goos" = "windows" ]; then
               (cd build && zip -qr "../dist/$(basename "$outdir").zip" "$(basename "$outdir")")
             else
@@ -90,7 +92,7 @@ jobs:
       - name: verify the linux/amd64 binary
         run: |
           version="${{ steps.v.outputs.version }}"
-          bin="build/snapshot-agent_${version}_linux_amd64/snapshot-agent"
+          bin="build/snapshot-agent_linux_amd64/snapshot-agent"
           got=$("$bin" version)
           test "$got" = "$version" || { echo "::error::binary reports $got, expected $version"; exit 1; }
           "$bin" once . > /dev/null
@@ -112,13 +114,14 @@ jobs:
           {
             echo "## snapshot-agent $version"
             echo
-            echo "Static, CGO-free binaries. Download the archive for your platform,"
-            echo "put \`snapshot-agent\` on your PATH, then:"
+            echo "Install it from your flockatime dashboard: **Connect the CLI** gives a"
+            echo "one-line command for Windows, macOS and Linux that downloads this"
+            echo "release, checks it against \`SHA256SUMS\`, and sets everything up."
+            echo
+            echo "Manual install: unpack the archive for your platform, then"
             echo
             echo '```'
-            echo "snapshot-agent once .      # snapshot this directory, send nothing"
-            echo "snapshot-agent doctor      # validate config and endpoint"
-            echo "snapshot-agent run         # daemon loop"
+            echo "snapshot-agent setup --endpoint https://your-flockatime --key flk_..."
             echo '```'
             echo
             echo "Verify a download against \`SHA256SUMS\`."
