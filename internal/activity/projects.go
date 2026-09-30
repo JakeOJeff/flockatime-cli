@@ -50,7 +50,7 @@ func (w WakaTime) RecentProjects(since time.Time) []Project {
 			continue
 		}
 		seen[root] = true
-		out = append(out, Project{Name: filepath.Base(root), Path: root})
+		out = append(out, Project{Name: projectName(root), Path: root})
 	}
 	return out
 }
@@ -101,6 +101,20 @@ func (w WakaTime) recentHeartbeats(since time.Time) []heartbeat {
 		out[i], out[j] = out[j], out[i]
 	}
 	return out
+}
+
+// projectName is what WakaTime calls the repository at root: the first line of
+// a .wakatime-project file if there is one, else the folder name. Matching its
+// rule keeps a project under the same name here as on the Hackatime dashboard.
+func projectName(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, ".wakatime-project"))
+	if err == nil {
+		line, _, _ := strings.Cut(string(b), "\n")
+		if name := strings.TrimSpace(line); name != "" {
+			return name
+		}
+	}
+	return filepath.Base(root)
 }
 
 // repoRoot walks up from a file to the nearest folder holding .git, which is

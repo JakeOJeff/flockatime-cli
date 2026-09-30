@@ -181,3 +181,18 @@ func TestHomeDirectoryIsNeverAProject(t *testing.T) {
 		t.Fatalf("nested repo root = %q, want %q", got, nested)
 	}
 }
+
+func TestWakatimeProjectFileNamesTheProject(t *testing.T) {
+	dir := t.TempDir()
+	root := mkrepo(t, dir, "folder-name")
+	if err := os.WriteFile(filepath.Join(root, ".wakatime-project"), []byte("Shown Name\r\nbranch-override\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	writeLog(t, dir, heartbeat{File: filepath.Join(root, "a.go"), Time: float64(now.Unix())})
+
+	got := WakaTime{Dir: dir}.RecentProjects(now.Add(-time.Hour))
+	if len(got) != 1 || got[0].Name != "Shown Name" {
+		t.Fatalf("got %+v, want the name from .wakatime-project", got)
+	}
+}
