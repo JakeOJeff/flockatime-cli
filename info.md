@@ -11,6 +11,40 @@ in it.
 
 Static Go binary, no CGO.
 
+## Install in one command
+
+On your flockatime dashboard, open **Connect the CLI** and press **Generate
+install command**. It gives you one line with a fresh key in it:
+
+```powershell
+# Windows (PowerShell)
+$env:FLOCKATIME_KEY='flk_...'; irm https://your-flockatime/install.ps1 | iex
+```
+
+```sh
+# macOS / Linux
+curl -fsSL https://your-flockatime/install.sh | FLOCKATIME_KEY=flk_... sh
+```
+
+That downloads the latest release from this repo, checks it against the
+release's `SHA256SUMS`, puts it in `~/.flockatime/bin`, and runs
+`snapshot-agent setup`, which:
+
+1. checks the key with the server, before writing anything;
+2. writes `~/.snapshot-agent.toml` with `[activity] source = "wakatime"`;
+3. turns on `debug = true` in `~/.wakatime.cfg`, so the agent can see which
+   file you are editing (nothing about your heartbeats changes);
+4. starts the agent now and at every login --- a hidden Startup item on
+   Windows, a LaunchAgent on macOS, a systemd user unit on Linux.
+
+From then on it works like Hackatime: there is no project list. Whatever git
+repo you edit is snapshotted while you work and left alone when you stop, under
+the same name Hackatime shows (a `.wakatime-project` file wins over the folder
+name). Hackatime must already be set up on the machine; if it is not, setup
+says so --- install it, then run the command again.
+
+Run the same command again to upgrade or to switch keys.
+
 ## What it sends, and what it never sends
 
 ```json
@@ -89,11 +123,12 @@ when it comes back.
 
 | Command | Does |
 |---|---|
+| `setup --endpoint URL --key KEY` | everything the install command does after downloading: check key, write config, enable WakaTime debug log, start at login |
 | `once [dir]` | one snapshot, printed as JSON, sends nothing. With a dir it needs no config |
 | `run` | the daemon: capture every interval, POST, queue to disk on failure |
 | `doctor` | validate config, probe the endpoint, list resolved projects. Sends nothing |
 | `devserver [port]` | a local collector that prints what it receives. Default `127.0.0.1:8787` |
-| `install` / `uninstall` | start at login, hidden, no Administrator |
+| `install` / `uninstall` | start (or stop) at login and now, hidden, no Administrator or sudo |
 | `version` | print the version |
 
 Config lives at `~/.snapshot-agent.toml`, or wherever `SNAPSHOT_AGENT_CONFIG`
@@ -149,17 +184,30 @@ Content-Type: application/json
 
 `devserver.go` is a working collector in 75 lines.
 
-## Installing it
+## Installing from source
 
 ```
 go build -o ~/bin/snapshot-agent.exe .    # somewhere permanent; the path is recorded
-~/bin/snapshot-agent.exe doctor           # check it first
-~/bin/snapshot-agent.exe install
+~/bin/snapshot-agent.exe setup --endpoint https://your-flockatime --key flk_...
 ```
 
-On Windows that drops a hidden launcher in the Startup folder. On macOS and
-Linux it prints the launchd plist or systemd unit to save. `uninstall` removes
-it and leaves your config and queue alone.
+`install` alone registers the login item for a config you wrote by hand: a
+hidden launcher in the Startup folder on Windows, `~/Library/LaunchAgents/
+com.snapshot-agent.plist` on macOS (log in `~/Library/Logs`), and a systemd user
+unit on Linux (`journalctl --user -u snapshot-agent`). `uninstall` removes it
+and leaves your config and queue alone.
+
+## Releasing
+
+Bump `agentVersion` in `main.go`, then push a matching tag:
+
+```
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The release workflow tests, builds every platform, and publishes archives with
+version-less names (`snapshot-agent_windows_amd64.zip`, ...) plus `SHA256SUMS`,
+which is what the install commands download.
 
 ## Tests
 
