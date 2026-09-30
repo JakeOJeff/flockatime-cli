@@ -25,10 +25,10 @@ var ErrNoConfig = errors.New("no config file")
 type Config struct {
 	Endpoint        string    `toml:"endpoint"`
 	APIKey          string    `toml:"api_key"`
-	IntervalSeconds int       `toml:"interval_seconds"`
-	QueuePath       string    `toml:"queue_path"`
+	IntervalSeconds int       `toml:"interval_seconds,omitzero"`
+	QueuePath       string    `toml:"queue_path,omitempty"`
 	Activity        Activity  `toml:"activity"`
-	Projects        []Project `toml:"project"`
+	Projects        []Project `toml:"project,omitempty"`
 }
 
 // Activity controls when the daemon captures at all. With the default source
@@ -36,9 +36,9 @@ type Config struct {
 // editor has been quiet for IdleMultiplier intervals.
 type Activity struct {
 	Source         string `toml:"source"`
-	IdleMultiplier int    `toml:"idle_multiplier"`
-	PollSeconds    int    `toml:"poll_seconds"`
-	WakaTimeDir    string `toml:"wakatime_dir"`
+	IdleMultiplier int    `toml:"idle_multiplier,omitzero"`
+	PollSeconds    int    `toml:"poll_seconds,omitzero"`
+	WakaTimeDir    string `toml:"wakatime_dir,omitempty"`
 }
 
 // Project is one watched directory.
@@ -155,6 +155,12 @@ func (a *Activity) applyDefaults(intervalSeconds int) error {
 		a.PollSeconds = intervalSeconds
 	}
 	if a.WakaTimeDir == "" {
+		// wakatime-cli keeps its log under $WAKATIME_HOME/.wakatime when that
+		// is set, and under the home directory otherwise.
+		if h := os.Getenv("WAKATIME_HOME"); h != "" {
+			a.WakaTimeDir = filepath.Join(h, ".wakatime")
+			return nil
+		}
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("locating home directory: %w", err)
