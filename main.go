@@ -13,11 +13,13 @@ import (
 
 // agentVersion is stamped at link time by the release build with
 // -ldflags "-X main.agentVersion=...". A plain `go build` keeps this default.
-var agentVersion = "0.1.0"
+var agentVersion = "0.2.0"
 
 var usage = `snapshot-agent ` + agentVersion + `
 
 usage:
+  snapshot-agent setup --endpoint URL --key KEY
+                               configure, follow Hackatime, start at login
   snapshot-agent once [dir]    capture one snapshot, print JSON, send nothing
   snapshot-agent run           daemon loop: capture every interval and POST
   snapshot-agent doctor        validate config, probe endpoint, print project stats
@@ -45,6 +47,8 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "devserver":
 		err = cmdDevServer(os.Args[2:])
+	case "setup":
+		err = cmdSetup(os.Args[2:])
 	case "install":
 		err = cmdInstall(os.Args[2:])
 	case "uninstall":

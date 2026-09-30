@@ -75,3 +75,28 @@ func (c *Client) Reachable() error {
 	io.Copy(io.Discard, resp.Body)
 	return nil
 }
+
+// Verify posts an empty batch, which a collector accepts only with a valid
+// key. `setup` uses it so a mistyped key fails at install time, not silently
+// at every tick afterwards.
+func (c *Client) Verify() error {
+	req, err := http.NewRequest(http.MethodPost, c.Endpoint+"/v1/snapshots", bytes.NewReader([]byte("[]")))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("the endpoint rejected the API key (%s)", resp.Status)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("endpoint returned %s", resp.Status)
+	}
+	return nil
+}
