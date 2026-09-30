@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -101,6 +103,9 @@ func (c *Config) Validate(requireEndpoint bool) error {
 		if strings.TrimSpace(c.APIKey) == "" {
 			return fmt.Errorf("api_key is required")
 		}
+		if err := CheckEndpoint(c.Endpoint); err != nil {
+			return err
+		}
 	}
 	c.Endpoint = strings.TrimRight(c.Endpoint, "/")
 	seen := make(map[string]bool, len(c.Projects))
@@ -174,6 +179,28 @@ func (a *Activity) applyDefaults(intervalSeconds int) error {
 	}
 	a.WakaTimeDir = dir
 	return nil
+}
+
+// CheckEndpoint refuses an endpoint the API key would cross the network to in
+// cleartext. Every request carries the key, so anything but https is allowed
+// only when it never leaves this machine --- the devserver and wrangler dev.
+func CheckEndpoint(endpoint string) error {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("endpoint %q is not a URL like https://collect.example.com", endpoint)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+		return fmt.Errorf("endpoint %q is plain http, which would send the API key unencrypted; use https", endpoint)
+	default:
+		return fmt.Errorf("endpoint %q must start with https://", endpoint)
+	}
 }
 
 // IdleAfter is how long the editor may stay quiet before the daemon goes

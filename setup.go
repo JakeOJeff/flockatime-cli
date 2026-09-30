@@ -38,7 +38,10 @@ func cmdSetup(args []string) error {
 	*endpoint = strings.TrimRight(strings.TrimSpace(*endpoint), "/")
 	*key = strings.TrimSpace(*key)
 	if *endpoint == "" || *key == "" {
-		return fmt.Errorf("usage: snapshot-agent setup --endpoint URL --key KEY")
+		return fmt.Errorf("usage: snapshot-agent setup --endpoint URL, with the key in FLOCKATIME_KEY (or --key KEY)")
+	}
+	if err := config.CheckEndpoint(*endpoint); err != nil {
+		return err
 	}
 
 	// 1. The key, before anything is written: a typo should fail here, not
