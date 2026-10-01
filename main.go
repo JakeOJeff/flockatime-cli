@@ -13,7 +13,7 @@ import (
 
 // agentVersion is stamped at link time by the release build with
 // -ldflags "-X main.agentVersion=...". A plain `go build` keeps this default.
-var agentVersion = "0.2.1"
+var agentVersion = "0.2.2"
 
 var usage = `snapshot-agent ` + agentVersion + `
 
