@@ -321,11 +321,17 @@ func cmdDoctor(args []string) error {
 		if s.Git != nil {
 			git = fmt.Sprintf("%s @ %s", s.Git.Branch, short(s.Git.Head))
 			if s.Git.Dirty {
-				git += " (dirty)"
+				g := s.Git
+				git += fmt.Sprintf(" (dirty: %d staged, %d modified, %d untracked, +%d -%d)",
+					g.Staged, g.Modified, g.Untracked, g.Insertions, g.Deletions)
 			}
+			git += fmt.Sprintf(", %d commits, %d ahead / %d behind", s.Git.Commits, s.Git.Ahead, s.Git.Behind)
 		}
 		fmt.Printf("  %-16s %s\n      %d files, %d lines, tree %s, %s\n",
 			p.Name, p.Path, s.FileCount, s.TotalLines, short(s.TreeHash), git)
+		if s.SkippedFiles > 0 {
+			fmt.Printf("      %d file(s) left out: over 2 MB or unreadable\n", s.SkippedFiles)
+		}
 	}
 	return nil
 }

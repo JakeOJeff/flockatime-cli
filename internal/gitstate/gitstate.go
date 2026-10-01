@@ -16,12 +16,29 @@ import (
 	"time"
 )
 
-// State mirrors the git block of a snapshot payload.
+// State mirrors the git block of a snapshot payload. Everything past Branch is
+// a count or a time: no path from status or diff is ever kept.
 type State struct {
 	Head   string
 	Branch string
 	Dirty  bool
 	Ahead  int
+	Behind int
+
+	// Working tree, from status. A file both staged and changed again counts
+	// in Staged and Modified.
+	Staged     int
+	Modified   int
+	Untracked  int
+	Conflicted int
+
+	// Uncommitted lines against HEAD, staged or not.
+	Insertions int
+	Deletions  int
+
+	Commits      int   // reachable from HEAD
+	LastCommitAt int64 // committer time of HEAD, unix seconds
+	Stashes      int
 }
 
 // Read returns the state of the repo at root, or (nil, nil) if root has no
@@ -38,24 +55,97 @@ func Read(root string) (*State, error) {
 		s.Branch = "" // detached
 	}
 
-	// --porcelain prints one line per changed path. We only count whether
-	// there is any output at all --- the paths themselves are discarded.
-	//
-	// status can run a repository's filter drivers to re-check a file, so it
-	// is skipped when the repository defines its own; Dirty stays false.
-	// Submodules are left out because their configs are not checked.
+	// status and diff can run a repository's filter drivers to re-check a
+	// file, so both are skipped when the repository defines its own; the
+	// working-tree fields stay zero. Submodules are left out because their
+	// configs are not checked.
 	if !hasRepoFilters(root) {
-		status, err := run(root, "status", "--porcelain", "--ignore-submodules=all")
-		if err == nil {
-			s.Dirty = status != ""
+		// One line per changed path. Only the two-letter code is read; the
+		// paths themselves are discarded.
+		if out, err := runRaw(root, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=all"); err == nil {
+			s.Dirty = strings.TrimSpace(out) != ""
+			countStatus(s, out)
+		}
+		// --no-ext-diff and --no-textconv: both name commands a repository's
+		// config can set. A repo with no commits yet has no HEAD to diff.
+		if s.Head != "" {
+			if out, err := run(root, "diff", "--shortstat", "--no-ext-diff", "--no-textconv",
+				"--ignore-submodules=all", "HEAD"); err == nil {
+				s.Insertions, s.Deletions = parseShortstat(out)
+			}
 		}
 	}
 
-	// Fails when there is no upstream configured, which leaves Ahead at 0.
-	if out, err := run(root, "rev-list", "--count", "@{u}..HEAD"); err == nil {
-		s.Ahead, _ = strconv.Atoi(out)
+	// Fails when there is no upstream configured, which leaves both at 0.
+	// The output is "behind<TAB>ahead".
+	if out, err := run(root, "rev-list", "--left-right", "--count", "@{u}...HEAD"); err == nil {
+		if b, a, ok := strings.Cut(out, "\t"); ok {
+			s.Behind, _ = strconv.Atoi(b)
+			s.Ahead, _ = strconv.Atoi(a)
+		}
+	}
+
+	if s.Head != "" {
+		if out, err := run(root, "rev-list", "--count", "HEAD"); err == nil {
+			s.Commits, _ = strconv.Atoi(out)
+		}
+		if out, err := run(root, "log", "-1", "--no-show-signature", "--format=%ct", "HEAD"); err == nil {
+			s.LastCommitAt, _ = strconv.ParseInt(out, 10, 64)
+		}
+	}
+	// Fails when nothing is stashed, which leaves Stashes at 0.
+	if out, err := run(root, "rev-list", "--walk-reflogs", "--count", "refs/stash"); err == nil {
+		s.Stashes, _ = strconv.Atoi(out)
 	}
 	return s, nil
+}
+
+// countStatus tallies porcelain lines by their two-letter code.
+func countStatus(s *State, out string) {
+	if out == "" {
+		return
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if len(line) < 2 {
+			continue
+		}
+		x, y := line[0], line[1]
+		switch {
+		case x == '?' && y == '?':
+			s.Untracked++
+		case x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D'):
+			s.Conflicted++
+		default:
+			if x != ' ' {
+				s.Staged++
+			}
+			if y != ' ' {
+				s.Modified++
+			}
+		}
+	}
+}
+
+// parseShortstat reads " 3 files changed, 10 insertions(+), 2 deletions(-)",
+// where either count is left out when it is zero.
+func parseShortstat(out string) (ins, del int) {
+	for _, part := range strings.Split(out, ",") {
+		f := strings.Fields(part)
+		if len(f) < 2 {
+			continue
+		}
+		n, err := strconv.Atoi(f[0])
+		if err != nil {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(f[1], "insertion"):
+			ins = n
+		case strings.HasPrefix(f[1], "deletion"):
+			del = n
+		}
+	}
+	return ins, del
 }
 
 // hasRepoFilters reports whether the repository's own config (or anything it
@@ -86,9 +176,16 @@ var safeConfig = []string{
 	"-c", "status.submoduleSummary=false",
 }
 
-// run executes git in dir and returns trimmed stdout. Every call is bounded so
-// a hung git (a credential prompt, a stale lock) cannot stall the daemon.
+// run executes git in dir and returns trimmed stdout.
 func run(dir string, args ...string) (string, error) {
+	out, err := runRaw(dir, args...)
+	return strings.TrimSpace(out), err
+}
+
+// runRaw is run without the trim, for output whose leading space means
+// something (a status code like " M"). Every call is bounded so a hung git (a
+// credential prompt, a stale lock) cannot stall the daemon.
+func runRaw(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append(append([]string{}, safeConfig...), args...)...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
@@ -114,5 +211,5 @@ func run(dir string, args ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	return string(out), nil
 }

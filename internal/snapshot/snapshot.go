@@ -5,6 +5,7 @@ package snapshot
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"runtime"
 	"sort"
 	"time"
 
@@ -13,14 +14,23 @@ import (
 
 // Snapshot is one capture of one project, and is the unit of the wire payload.
 type Snapshot struct {
-	Project      string `json:"project"`
-	CapturedAt   int64  `json:"captured_at"`
-	TreeHash     string `json:"tree_hash"`
-	FileCount    int    `json:"file_count"`
-	TotalLines   int    `json:"total_lines"`
+	Project    string `json:"project"`
+	CapturedAt int64  `json:"captured_at"`
+	TreeHash   string `json:"tree_hash"`
+	FileCount  int    `json:"file_count"`
+	TotalLines int    `json:"total_lines"`
+	TotalBytes int64  `json:"total_bytes"`
+	// SkippedFiles were left out for being over the size cap or unreadable;
+	// .gitignore'd files and the skip-listed folders are not counted.
+	SkippedFiles int    `json:"skipped_files"`
 	Git          *Git   `json:"git,omitempty"`
 	Files        []File `json:"files"`
 	Unchanged    bool   `json:"unchanged,omitempty"`
+	// CaptureMs is how long the walk and git took, so a collector can see a
+	// project getting too big to snapshot cheaply.
+	CaptureMs    int64  `json:"capture_ms"`
+	OS           string `json:"os"`
+	Arch         string `json:"arch"`
 	AgentVersion string `json:"agent_version"`
 }
 
@@ -35,11 +45,22 @@ type File struct {
 }
 
 // Git is the repository state at capture time, absent for non-repo projects.
+// Past branch it is only counts and a time; see gitstate.State.
 type Git struct {
-	Head   string `json:"head"`
-	Branch string `json:"branch"`
-	Dirty  bool   `json:"dirty"`
-	Ahead  int    `json:"ahead"`
+	Head         string `json:"head"`
+	Branch       string `json:"branch"`
+	Dirty        bool   `json:"dirty"`
+	Ahead        int    `json:"ahead"`
+	Behind       int    `json:"behind"`
+	Staged       int    `json:"staged"`
+	Modified     int    `json:"modified"`
+	Untracked    int    `json:"untracked"`
+	Conflicted   int    `json:"conflicted"`
+	Insertions   int    `json:"insertions"`
+	Deletions    int    `json:"deletions"`
+	Commits      int    `json:"commits"`
+	LastCommitAt int64  `json:"last_commit_at,omitempty"`
+	Stashes      int    `json:"stashes"`
 }
 
 // TreeHash is SHA-256 over the sorted "path_hash:content_hash" lines. Sorting
@@ -62,29 +83,42 @@ func TreeHash(files []File) string {
 
 // Capture walks root and returns the snapshot for the named project.
 func Capture(name, root, agentVersion string) (*Snapshot, error) {
-	files, err := Walk(root)
+	start := time.Now()
+	files, skipped, err := walk(root)
 	if err != nil {
 		return nil, err
 	}
 
 	total := 0
+	var bytes int64
 	for _, f := range files {
 		total += f.Lines
+		bytes += f.Bytes
 	}
 
 	s := &Snapshot{
 		Project:      name,
-		CapturedAt:   time.Now().Unix(),
+		CapturedAt:   start.Unix(),
 		TreeHash:     TreeHash(files),
 		FileCount:    len(files),
 		TotalLines:   total,
+		TotalBytes:   bytes,
+		SkippedFiles: skipped,
 		Files:        files,
+		OS:           runtime.GOOS,
+		Arch:         runtime.GOARCH,
 		AgentVersion: agentVersion,
 	}
 
 	if g, err := gitstate.Read(root); err == nil && g != nil {
-		s.Git = &Git{Head: g.Head, Branch: g.Branch, Dirty: g.Dirty, Ahead: g.Ahead}
+		s.Git = &Git{
+			Head: g.Head, Branch: g.Branch, Dirty: g.Dirty, Ahead: g.Ahead, Behind: g.Behind,
+			Staged: g.Staged, Modified: g.Modified, Untracked: g.Untracked, Conflicted: g.Conflicted,
+			Insertions: g.Insertions, Deletions: g.Deletions,
+			Commits: g.Commits, LastCommitAt: g.LastCommitAt, Stashes: g.Stashes,
+		}
 	}
+	s.CaptureMs = time.Since(start).Milliseconds()
 	return s, nil
 }
 

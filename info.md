@@ -54,16 +54,32 @@ Run the same command again to upgrade or to switch keys.
   "tree_hash": "f397336f865d...",
   "file_count": 28,
   "total_lines": 3800,
-  "git": { "head": "eb4cf53b...", "branch": "main", "dirty": false, "ahead": 0 },
+  "total_bytes": 120578,
+  "skipped_files": 0,
+  "git": {
+    "head": "eb4cf53b...", "branch": "main", "dirty": true, "ahead": 0, "behind": 0,
+    "staged": 0, "modified": 4, "untracked": 1, "conflicted": 0,
+    "insertions": 222, "deletions": 33,
+    "commits": 27, "last_commit_at": 1788370000, "stashes": 0
+  },
   "files": [
     { "path_hash": "618cd5b8...", "content_hash": "52d9604e...", "lines": 10, "bytes": 298, "mtime": 1787687549 }
   ],
-  "agent_version": "0.1.0"
+  "capture_ms": 41,
+  "os": "windows",
+  "arch": "amd64",
+  "agent_version": "0.2.2"
 }]
 ```
 
 `tree_hash` is SHA-256 over the sorted `path_hash:content_hash` list — stable
 across runs, different after a one-character edit or a rename.
+
+The git block past `branch` is only counts: files staged, modified, untracked
+or in conflict (from `git status`, paths discarded), uncommitted lines
+added and removed against `HEAD` (`git diff --shortstat`), commits on `HEAD`,
+the last commit's time, and stashes. `skipped_files` counts files left out for
+being over 2 MB or unreadable. `capture_ms` is how long the walk and git took.
 
 **Never on the wire:** file contents, file names, folder names, keystrokes,
 window titles, processes, screenshots, the clipboard. The only plaintext is the

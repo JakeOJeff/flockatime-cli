@@ -29,9 +29,17 @@ type matcher struct {
 // skipped rather than aborting the walk: an unreadable file should not cost
 // us the whole snapshot.
 func Walk(root string) ([]File, error) {
+	files, _, err := walk(root)
+	return files, err
+}
+
+// walk is Walk that also counts the files it had to leave out: over the size
+// cap, or failing to stat or read.
+func walk(root string) ([]File, int, error) {
 	var (
 		files    []File
 		matchers []matcher
+		skipped  int
 	)
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -64,16 +72,18 @@ func Walk(root string) ([]File, error) {
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		info, infoErr := d.Info()
-		if infoErr != nil || info.Size() > maxFileBytes {
+		if ignored(matchers, rel, false) {
 			return nil
 		}
-		if ignored(matchers, rel, false) {
+		info, infoErr := d.Info()
+		if infoErr != nil || info.Size() > maxFileBytes {
+			skipped++
 			return nil
 		}
 
 		contentHash, lines, hashErr := hashFile(path)
 		if hashErr != nil {
+			skipped++
 			return nil
 		}
 		files = append(files, File{
@@ -86,9 +96,9 @@ func Walk(root string) ([]File, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return files, nil
+	return files, skipped, nil
 }
 
 // loadIgnore appends the .gitignore in dir, if it has one. WalkDir descends

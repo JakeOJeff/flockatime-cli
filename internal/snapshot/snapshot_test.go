@@ -218,3 +218,27 @@ func TestAsUnchangedDropsFileList(t *testing.T) {
 		t.Error("original snapshot must not be mutated")
 	}
 }
+
+func TestCaptureCountsSkippedAndBytes(t *testing.T) {
+	root := tree(t, map[string]string{".gitignore": "ignored.bin\n", "a.txt": "abc\n"})
+	for _, name := range []string{"big.bin", "ignored.bin"} {
+		if err := os.WriteFile(filepath.Join(root, name), make([]byte, maxFileBytes+1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := Capture("p", root, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// big.bin is over the cap; ignored.bin is .gitignore'd, which is not a skip.
+	if s.SkippedFiles != 1 {
+		t.Errorf("skipped %d, want 1", s.SkippedFiles)
+	}
+	// .gitignore and a.txt.
+	if want := int64(len("ignored.bin\n") + len("abc\n")); s.TotalBytes != want {
+		t.Errorf("total bytes %d, want %d", s.TotalBytes, want)
+	}
+	if s.OS == "" || s.Arch == "" {
+		t.Error("os and arch should be set")
+	}
+}

@@ -109,3 +109,51 @@ func TestIncludedFilterDriverNeverRuns(t *testing.T) {
 	Read(dir)
 	assertNotRun(t, ran)
 }
+
+func TestWorkingTreeCounts(t *testing.T) {
+	dir := gitRepo(t)
+	write(t, filepath.Join(dir, "b.txt"), "b\n")
+	git(t, dir, "add", "b.txt")
+	git(t, dir, "commit", "-q", "-m", "second")
+
+	write(t, filepath.Join(dir, "a.txt"), "stashed\n")
+	git(t, dir, "stash", "push", "-q")
+
+	write(t, filepath.Join(dir, "a.txt"), "one\ntwo\nthree\n") // modified: +2
+	write(t, filepath.Join(dir, "c.txt"), "new\n")
+	git(t, dir, "add", "c.txt") // staged: +1
+	write(t, filepath.Join(dir, "d.txt"), "loose\n")
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "sub", "e.txt"), "loose\n") // counted per file, not per folder
+
+	s, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Staged != 1 || s.Modified != 1 || s.Untracked != 2 || s.Conflicted != 0 {
+		t.Errorf("status counts: staged %d modified %d untracked %d conflicted %d",
+			s.Staged, s.Modified, s.Untracked, s.Conflicted)
+	}
+	if s.Insertions != 3 || s.Deletions != 0 {
+		t.Errorf("shortstat: +%d -%d, want +3 -0", s.Insertions, s.Deletions)
+	}
+	if s.Commits != 2 || s.LastCommitAt == 0 || s.Stashes != 1 {
+		t.Errorf("history: commits %d last %d stashes %d", s.Commits, s.LastCommitAt, s.Stashes)
+	}
+}
+
+func TestParseShortstat(t *testing.T) {
+	cases := map[string][2]int{
+		"":                                 {0, 0},
+		" 1 file changed, 1 insertion(+)":  {1, 0},
+		" 2 files changed, 3 deletions(-)": {0, 3},
+		" 3 files changed, 10 insertions(+), 2 deletions(-)": {10, 2},
+	}
+	for in, want := range cases {
+		if i, d := parseShortstat(in); i != want[0] || d != want[1] {
+			t.Errorf("%q: got +%d -%d, want +%d -%d", in, i, d, want[0], want[1])
+		}
+	}
+}
