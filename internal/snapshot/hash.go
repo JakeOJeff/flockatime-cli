@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -50,10 +51,23 @@ func hashFile(path string) (contentHash string, lines int, err error) {
 	return hex.EncodeToString(h.Sum(nil)), lines, nil
 }
 
-// hashPath returns SHA-256 of a project-relative path, so the payload carries
-// the shape of the tree without any of its names. Separators are normalized to
-// "/" so the same repo hashes identically on Windows and Unix.
-func hashPath(rel string) string {
-	sum := sha256.Sum256([]byte(filepath.ToSlash(rel)))
-	return hex.EncodeToString(sum[:])
+// HashPath hashes a project-relative path, so the payload carries the shape of
+// the tree without any of its names. Separators are normalized to "/" so the
+// same repo hashes identically on Windows and Unix.
+//
+// With a salt it is HMAC-SHA256(salt, path). Unsalted, a path hash is the same
+// for everyone, so common names ("src/main.rs") can be found by hashing a
+// dictionary of likely paths; the salt makes that guess useless without it.
+func HashPath(rel string, salt []byte) string {
+	p := []byte(filepath.ToSlash(rel))
+	if len(salt) == 0 {
+		sum := sha256.Sum256(p)
+		return hex.EncodeToString(sum[:])
+	}
+	m := hmac.New(sha256.New, salt)
+	m.Write(p)
+	return hex.EncodeToString(m.Sum(nil))
 }
+
+// hashPath is the unsalted HashPath.
+func hashPath(rel string) string { return HashPath(rel, nil) }

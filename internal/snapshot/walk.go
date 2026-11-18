@@ -29,18 +29,27 @@ type matcher struct {
 // skipped rather than aborting the walk: an unreadable file should not cost
 // us the whole snapshot.
 func Walk(root string) ([]File, error) {
-	files, _, err := walk(root, nil)
-	return files, err
+	r, err := walk(root, Options{})
+	return r.files, err
 }
 
-// walk is Walk that also counts the files it had to leave out: over the size
-// cap, or failing to stat or read.
-func walk(root string, obs Observer) ([]File, int, error) {
+// walkResult is everything one walk learns about a tree.
+type walkResult struct {
+	files   []File
+	skipped int   // over the size cap, or failing to stat or read
+	buildAt int64 // newest mtime at the top of a build-output folder, 0 if none
+	testAt  int64 // the same for test caches
+}
+
+// walk is Walk with options, reporting everything in walkResult.
+func walk(root string, opt Options) (walkResult, error) {
 	var (
 		files    []File
 		matchers []matcher
 		skipped  int
+		res      walkResult
 	)
+	obs := opt.Observer
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -87,7 +96,7 @@ func walk(root string, obs Observer) ([]File, int, error) {
 			return nil
 		}
 		f := File{
-			PathHash:    hashPath(rel),
+			PathHash:    HashPath(rel, opt.PathSalt),
 			ContentHash: contentHash,
 			Lines:       lines,
 			Bytes:       info.Size(),
@@ -100,9 +109,10 @@ func walk(root string, obs Observer) ([]File, int, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, 0, err
+		return walkResult{}, err
 	}
-	return files, skipped, nil
+	res.files, res.skipped = files, skipped
+	return res, nil
 }
 
 // loadIgnore appends the .gitignore in dir, if it has one. WalkDir descends

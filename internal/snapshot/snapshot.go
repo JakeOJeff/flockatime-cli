@@ -32,6 +32,22 @@ type Snapshot struct {
 	OS           string `json:"os"`
 	Arch         string `json:"arch"`
 	AgentVersion string `json:"agent_version"`
+
+	// Seq numbers a project's snapshots 1, 2, 3...; PrevTreeHash is the tree
+	// hash of seq-1. Together they let a collector check the history has no
+	// gaps and no forks. Both persist in the line state file.
+	Seq          uint64 `json:"seq,omitempty"`
+	PrevTreeHash string `json:"prev,omitempty"`
+
+	// SaveTimes are seconds after the previous capture at which a known file's
+	// mtime moved, from a stat-only poll between captures.
+	SaveTimes []int32 `json:"saves,omitempty"`
+
+	// BuildTouchedAt and TestTouchedAt are the newest mtimes seen at the top of
+	// build output (dist/, target/, build/...) and test caches
+	// (.pytest_cache/, coverage/...). Their contents are never walked.
+	BuildTouchedAt int64 `json:"build_at,omitempty"`
+	TestTouchedAt  int64 `json:"test_at,omitempty"`
 }
 
 // File is one recorded file. PathHash holds a hash of the project-relative
@@ -48,6 +64,9 @@ type File struct {
 	Removed   int `json:"removed,omitempty"`
 	TailEdits int `json:"tail,omitempty"` // changed lines in the last ~10% of the file
 	MidEdits  int `json:"mid,omitempty"`
+	// Fingerprints are winnowed k-gram hashes of the normalized source (see
+	// internal/fingerprint), sent only for files whose content changed.
+	Fingerprints []uint64 `json:"fp,omitempty"`
 }
 
 // Observer sees each recorded file during the walk, with its absolute path,
@@ -96,17 +115,23 @@ func TreeHash(files []File) string {
 
 // Capture walks root and returns the snapshot for the named project.
 func Capture(name, root, agentVersion string) (*Snapshot, error) {
-	return CaptureWith(name, root, agentVersion, nil)
+	return CaptureWith(name, root, agentVersion, Options{})
 }
 
-// CaptureWith is Capture with an Observer, which may be nil.
-func CaptureWith(name, root, agentVersion string, obs Observer) (*Snapshot, error) {
+// Options tune a capture. The zero value is a plain unsalted capture.
+type Options struct {
+	Observer Observer // may be nil
+	PathSalt []byte   // nil hashes paths unsalted; see HashPath
+}
+
+// CaptureWith is Capture with Options.
+func CaptureWith(name, root, agentVersion string, opt Options) (*Snapshot, error) {
 	start := time.Now()
-	files, skipped, err := walk(root, obs)
+	res, err := walk(root, opt)
 	if err != nil {
 		return nil, err
 	}
-
+	files, skipped := res.files, res.skipped
 	total := 0
 	var bytes int64
 	for _, f := range files {
@@ -115,17 +140,19 @@ func CaptureWith(name, root, agentVersion string, obs Observer) (*Snapshot, erro
 	}
 
 	s := &Snapshot{
-		Project:      name,
-		CapturedAt:   start.Unix(),
-		TreeHash:     TreeHash(files),
-		FileCount:    len(files),
-		TotalLines:   total,
-		TotalBytes:   bytes,
-		SkippedFiles: skipped,
-		Files:        files,
-		OS:           runtime.GOOS,
-		Arch:         runtime.GOARCH,
-		AgentVersion: agentVersion,
+		Project:        name,
+		CapturedAt:     start.Unix(),
+		TreeHash:       TreeHash(files),
+		FileCount:      len(files),
+		TotalLines:     total,
+		TotalBytes:     bytes,
+		SkippedFiles:   skipped,
+		BuildTouchedAt: res.buildAt,
+		TestTouchedAt:  res.testAt,
+		Files:          files,
+		OS:             runtime.GOOS,
+		Arch:           runtime.GOARCH,
+		AgentVersion:   agentVersion,
 	}
 
 	if g, err := gitstate.Read(root); err == nil && g != nil {

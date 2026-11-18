@@ -86,7 +86,7 @@ func capture(t *testing.T, stateDir, root string) []snapshot.File {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := snapshot.CaptureWith("demo", root, "test", st)
+	s, err := snapshot.CaptureWith("demo", root, "test", snapshot.Options{Observer: st})
 	if err != nil {
 		t.Fatal(err)
 	}

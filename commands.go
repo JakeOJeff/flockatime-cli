@@ -312,7 +312,7 @@ func captureLines(name, path string, save bool) (*snapshot.Snapshot, error) {
 			logf("project %q: line state unavailable: %v", name, err)
 		}
 	}
-	s, err := snapshot.CaptureWith(name, path, agentVersion, obs)
+	s, err := snapshot.CaptureWith(name, path, agentVersion, snapshot.Options{Observer: obs})
 	if err != nil {
 		return nil, err
 	}
