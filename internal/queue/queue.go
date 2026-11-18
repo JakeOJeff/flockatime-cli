@@ -18,6 +18,10 @@ const MaxEntries = 5000
 
 var bucketName = []byte("snapshots")
 
+// ErrBusy means another process (normally the running agent) holds the queue
+// file; Open waits a few seconds for it and then gives up with this.
+var ErrBusy = bolt.ErrTimeout
+
 // Queue is a durable FIFO of undelivered snapshots. Keys are a big-endian
 // counter, so bbolt's byte-ordered cursor walks them oldest-first for free.
 type Queue struct {

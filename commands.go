@@ -14,6 +14,8 @@ import (
 	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/cadence"
 	"snapshot-agent/internal/config"
+	"snapshot-agent/internal/fingerprint"
+	"snapshot-agent/internal/linestate"
 	"snapshot-agent/internal/queue"
 	"snapshot-agent/internal/snapshot"
 	"snapshot-agent/internal/transport"
@@ -164,6 +166,7 @@ func cmdRun(args []string) error {
 	// at that instant finds nothing --- the closing snapshot has to be taken
 	// against the projects the session was actually spent in.
 	var lastProjects []config.Project
+	var lastCapture time.Time
 
 	// capture resolves which projects are live right now and snapshots them.
 	// The list is rebuilt every time rather than fixed at startup, so opening
@@ -188,6 +191,7 @@ func cmdRun(args []string) error {
 		}
 		lastProjects = projects
 		tick(projects, client, q, capt)
+		lastCapture = time.Now()
 		return nil
 	}
 
@@ -203,6 +207,12 @@ func cmdRun(args []string) error {
 	} else {
 		logf("dormant --- no activity in the last %s; waiting for a heartbeat", idleAfter)
 	}
+	// report leaves a status file for `doctor`. It runs on every poll too,
+	// so its age alone tells doctor whether the agent is alive.
+	report := func() {
+		writeStatus(capt.status(active, saves.cancel != nil, lastCapture, cfg.Activity.PollSeconds))
+	}
+	report()
 
 	for {
 		select {
@@ -226,14 +236,19 @@ func cmdRun(args []string) error {
 				capture(true)
 				saves.stop()
 			}
+			report()
 		case <-captureT.C:
 			if active {
 				if err := capture(false); err != nil {
 					return err
 				}
 			}
+			report()
 		case <-stop:
 			logf("shutting down")
+			st := capt.status(active, false, lastCapture, cfg.Activity.PollSeconds)
+			st.Stopped = true
+			writeStatus(st)
 			return nil
 		}
 	}
@@ -352,6 +367,7 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("api_key:  %s\n", mask(cfg.APIKey))
 
 	printActivity(cfg)
+	printDaemon()
 
 	client := transport.New(cfg.Endpoint, cfg.APIKey)
 	if err := client.Reachable(); err != nil {
@@ -364,6 +380,8 @@ func cmdDoctor(args []string) error {
 		n, _ := q.Len()
 		fmt.Printf("queue:    %s (%d waiting)\n", cfg.QueuePath, n)
 		q.Close()
+	} else if errors.Is(err, queue.ErrBusy) {
+		fmt.Printf("queue:    %s (in use by the running agent)\n", cfg.QueuePath)
 	} else {
 		fmt.Printf("queue:    unavailable --- %v\n", err)
 	}
@@ -374,13 +392,27 @@ func cmdDoctor(args []string) error {
 		projects = activeProjects(cfg, src, time.Now().Add(-cfg.IdleAfter()))
 	}
 
+	salt, saltErr := pathSalt(cfg)
+	if saltErr != nil {
+		fmt.Printf("salt:     ERROR --- %v\n", saltErr)
+	} else if cfg.PathSalt != "" {
+		fmt.Printf("salt:     path_salt from the config\n")
+	} else if p, err := saltFile(); err == nil {
+		fmt.Printf("salt:     %s\n", p)
+	}
+	saltID := linestate.SaltID(salt)
+	stateDir, _ := linestate.Dir()
 	fmt.Printf("\nprojects (%d pinned, %d from WakaTime):\n",
 		len(cfg.Projects), len(projects)-len(cfg.Projects))
 	if len(projects) == 0 {
 		printNoProjectsHelp(cfg)
 	}
+
 	for _, p := range projects {
-		s, err := snapshot.Capture(p.Name, p.Path, agentVersion)
+		// Count fingerprintable files in the same walk; doctor is run by
+		// hand, so reading every file once more is fine here.
+		fp := &fpCounter{}
+		s, err := snapshot.CaptureWith(p.Name, p.Path, agentVersion, snapshot.Options{PathSalt: salt, Observer: fp})
 		if err != nil {
 			fmt.Printf("  %-16s %s\n      ERROR %v\n", p.Name, p.Path, err)
 			continue
@@ -400,8 +432,89 @@ func cmdDoctor(args []string) error {
 		if s.SkippedFiles > 0 {
 			fmt.Printf("      %d file(s) left out: over 2 MB or unreadable\n", s.SkippedFiles)
 		}
+		fmt.Printf("      state: %s\n", describeState(stateDir, p.Name, saltID))
+		fmt.Printf("      fingerprints: %d of %d files can be fingerprinted (the rest are too short, binary, or unreadable)\n",
+			fp.ok, s.FileCount)
+		if s.BuildTouchedAt > 0 || s.TestTouchedAt > 0 {
+			fmt.Printf("      last build %s, last test run %s\n", ago(s.BuildTouchedAt), ago(s.TestTouchedAt))
+		}
 	}
 	return nil
+}
+
+// fpCounter is an Observer that counts files fingerprinting would cover.
+type fpCounter struct{ ok int }
+
+func (c *fpCounter) Observe(absPath string, f *snapshot.File) {
+	if fp, err := fingerprint.File(absPath, fingerprint.MaxPerFile); err == nil && len(fp) > 0 {
+		c.ok++
+	}
+}
+
+// describeState explains a project's state file in terms of what the
+// collector will see, so a reset chain or a quiet baseline is expected rather
+// than suspicious.
+func describeState(dir, project, saltID string) string {
+	if dir == "" {
+		return "UNAVAILABLE --- no home directory"
+	}
+	info, err := linestate.Inspect(dir, project, saltID)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("UNREADABLE --- %v; line counts and the chain restart at the next capture", err)
+	case !info.Exists:
+		return "none yet --- the first capture is a baseline (no line counts) and starts the chain at seq 1"
+	case !info.Readable:
+		return "CORRUPT --- the next capture is a baseline and the chain restarts at seq 1"
+	case !info.SaltMatch:
+		return fmt.Sprintf("seq %d; written with a different path salt, so the next capture is a quiet baseline (the chain continues)", info.Seq)
+	}
+	return fmt.Sprintf("ok --- seq %d, %d files remembered, %d KB, saved %s",
+		info.Seq, info.Files, (info.Bytes+1023)/1024, ago(info.ModTime.Unix()))
+}
+
+// printDaemon reads what a running agent last reported about itself.
+func printDaemon() {
+	st, err := readStatus()
+	if err != nil {
+		fmt.Printf("daemon:   no status --- `run` has not started on this machine (or ~/.flockatime is unwritable)\n")
+		return
+	}
+	age := time.Since(time.Unix(st.UpdatedAt, 0))
+	// It reports on every activity poll, so three missed polls means gone.
+	alive := !st.Stopped && age <= 3*time.Duration(max(st.PollSeconds, 1))*time.Second+5*time.Second
+	state := "dormant"
+	if st.Active {
+		state = "active"
+	}
+	if alive {
+		fmt.Printf("daemon:   running %s (pid %d), %s, last capture %s, last heard %s ago\n",
+			st.Version, st.PID, state, ago(st.LastCaptureAt), age.Round(time.Second))
+	} else if st.Stopped {
+		fmt.Printf("daemon:   stopped cleanly %s ago (version %s)\n", age.Round(time.Second), st.Version)
+	} else {
+		fmt.Printf("daemon:   NOT RUNNING --- last heard from %s ago (version %s, pid %d)\n",
+			age.Round(time.Second), st.Version, st.PID)
+	}
+	switch {
+	case !alive:
+	case st.CadenceOn:
+		fmt.Printf("cadence:  polling %d file(s) in %d project(s), last pass %s (%d ms)\n",
+			st.CadenceFiles, st.CadenceProjs, ago(st.LastPollAt), st.LastPollMs)
+	default:
+		fmt.Printf("cadence:  paused while dormant (resumes on the next heartbeat)\n")
+	}
+	if alive {
+		fmt.Printf("          %d changed file(s) fingerprinted since it started\n", st.FingerprintedN)
+	}
+}
+
+// ago renders a unix time as "3m ago", or "never" for zero.
+func ago(unix int64) string {
+	if unix <= 0 {
+		return "never"
+	}
+	return time.Since(time.Unix(unix, 0)).Round(time.Second).String() + " ago"
 }
 
 // printActivity reports which state `run` would start in and why --- the

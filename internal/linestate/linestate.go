@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"snapshot-agent/internal/snapshot"
 )
@@ -258,4 +259,41 @@ func hashLines(path string) (lines []uint64, contentHash string, err error) {
 		lines = append(lines, line.Sum64())
 	}
 	return lines, hex.EncodeToString(whole.Sum(nil)), nil
+}
+
+// Info describes a project's state file for `doctor`.
+type Info struct {
+	Exists    bool
+	Readable  bool   // decoded cleanly
+	SaltMatch bool   // written with the salt now in use
+	Seq       uint64 // last sequence number issued
+	Files     int    // files with line memory
+	Bytes     int64
+	ModTime   time.Time
+}
+
+// Inspect reports on the state file for project without changing it.
+func Inspect(dir, project, saltID string) (Info, error) {
+	p := filepath.Join(dir, fileName(project))
+	fi, err := os.Stat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Info{}, nil
+	}
+	if err != nil {
+		return Info{}, err
+	}
+	info := Info{Exists: true, Bytes: fi.Size(), ModTime: fi.ModTime()}
+	f, err := os.Open(p)
+	if err != nil {
+		return info, err
+	}
+	defer f.Close()
+	var d disk
+	if gob.NewDecoder(f).Decode(&d) != nil {
+		return info, nil
+	}
+	info.Readable = true
+	info.SaltMatch = d.SaltID == saltID
+	info.Seq, info.Files = d.Seq, len(d.Files)
+	return info, nil
 }
