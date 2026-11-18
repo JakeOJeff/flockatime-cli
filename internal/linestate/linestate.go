@@ -31,14 +31,36 @@ type entry struct {
 	Lines   []uint64
 }
 
-// State is the line memory of one project. Load it, pass it to
-// snapshot.CaptureWith as the observer, then Save it.
+// disk is the state file's layout.
+type disk struct {
+	// Seq and Tree are the head of the project's snapshot chain: the last
+	// sequence number issued and the tree hash it carried.
+	Seq  uint64
+	Tree string
+	// SaltID identifies the path salt the Files keys were hashed with. A
+	// different salt renames every key, so the line memory restarts rather
+	// than reporting every file as new.
+	SaltID string
+	Files  map[string]entry
+}
+
+// State is the line memory and snapshot chain of one project. Load it, pass
+// it to snapshot.CaptureWith as the observer, Chain the snapshot, then Save.
 type State struct {
-	path  string
-	fresh bool // no state on disk yet: this capture is the baseline, report no counts
-	prev  map[string]entry
-	next  map[string]entry
-	dirty bool
+	path   string
+	fresh  bool // no usable line memory: this capture is the baseline, report no counts
+	seq    uint64
+	tree   string
+	saltID string
+	prev   map[string]entry
+	next   map[string]entry
+	dirty  bool
+
+	// Changed, if set, is called for every file whose content is new or
+	// changed since the last capture (every file, on a baseline), after its
+	// line counts are filled in. It is how fingerprints are limited to files
+	// that actually changed.
+	Changed func(absPath string, f *snapshot.File)
 }
 
 // Dir is ~/.flockatime/state, next to the ~/.flockatime/bin the installer uses.
@@ -51,12 +73,14 @@ func Dir() (string, error) {
 }
 
 // Load reads the state for project from dir. A missing file is not an error:
-// it yields a fresh state whose first capture records a baseline.
-func Load(dir, project string) (*State, error) {
+// it yields a fresh state whose first capture records a baseline and starts
+// the chain at seq 1. saltID names the path salt in use (see SaltID).
+func Load(dir, project, saltID string) (*State, error) {
 	s := &State{
-		path: filepath.Join(dir, fileName(project)),
-		prev: map[string]entry{},
-		next: map[string]entry{},
+		path:   filepath.Join(dir, fileName(project)),
+		saltID: saltID,
+		prev:   map[string]entry{},
+		next:   map[string]entry{},
 	}
 	f, err := os.Open(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -67,13 +91,50 @@ func Load(dir, project string) (*State, error) {
 		return nil, err
 	}
 	defer f.Close()
-	if err := gob.NewDecoder(f).Decode(&s.prev); err != nil {
-		// A corrupt or old-format file costs one tick of counts, not the agent.
-		s.prev = map[string]entry{}
+	var d disk
+	if err := gob.NewDecoder(f).Decode(&d); err != nil {
+		// A corrupt or old-format file costs one tick of counts and restarts
+		// the chain, which a collector sees as a reset at seq 1 --- not the agent.
 		s.fresh = true
+		return s, nil
 	}
+	s.seq, s.tree = d.Seq, d.Tree
+	if d.SaltID != saltID || d.Files == nil {
+		s.fresh = true
+		s.dirty = true // persist the new salt even if no file changes
+		return s, nil
+	}
+	s.prev = d.Files
 	return s, nil
 }
+
+// SaltID is a short, non-reversible name for a path salt, so a state file can
+// tell that the salt changed without storing it.
+func SaltID(salt []byte) string {
+	if len(salt) == 0 {
+		return "unsalted"
+	}
+	sum := sha256.Sum256(append([]byte("linestate-salt-id:"), salt...))
+	return hex.EncodeToString(sum[:8])
+}
+
+// Chain stamps snap with the next sequence number and the previous snapshot's
+// tree hash, and makes snap the new head. Call it once per capture that will
+// be sent; a capture that is only displayed (`once`) can call it too and
+// simply not Save.
+func (s *State) Chain(snap *snapshot.Snapshot) {
+	s.seq++
+	snap.Seq = s.seq
+	snap.PrevTreeHash = s.tree
+	s.tree = snap.TreeHash
+	s.dirty = true
+}
+
+// Head is the last sequence number issued and its tree hash.
+func (s *State) Head() (seq uint64, tree string) { return s.seq, s.tree }
+
+// Files is how many files the line memory holds.
+func (s *State) Files() int { return len(s.prev) }
 
 // Observe implements snapshot.Observer. A file whose content hash is unchanged
 // is carried over without being read again; a changed or new one is re-read,
@@ -96,11 +157,13 @@ func (s *State) Observe(absPath string, f *snapshot.File) {
 	// next diff honest.
 	s.next[f.PathHash] = entry{Content: content, Lines: lines}
 	s.dirty = true
-	if s.fresh {
-		return
+	if !s.fresh {
+		c := Diff(old.Lines, lines) // old.Lines is nil for a new file: all added
+		f.Added, f.Removed, f.TailEdits, f.MidEdits = c.Added, c.Removed, c.Tail, c.Mid
 	}
-	c := Diff(old.Lines, lines) // old.Lines is nil for a new file: all added
-	f.Added, f.Removed, f.TailEdits, f.MidEdits = c.Added, c.Removed, c.Tail, c.Mid
+	if s.Changed != nil {
+		s.Changed(absPath, f)
+	}
 }
 
 // Save writes the state if anything changed. Files not observed this capture
@@ -117,7 +180,8 @@ func (s *State) Save() error {
 		return err
 	}
 	defer os.Remove(tmp.Name()) // no-op once renamed
-	if err := gob.NewEncoder(tmp).Encode(s.next); err != nil {
+	d := disk{Seq: s.seq, Tree: s.tree, SaltID: s.saltID, Files: s.next}
+	if err := gob.NewEncoder(tmp).Encode(d); err != nil {
 		tmp.Close()
 		return err
 	}

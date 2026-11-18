@@ -30,6 +30,7 @@ type Config struct {
 	IntervalSeconds int       `toml:"interval_seconds,omitzero"`
 	QueuePath       string    `toml:"queue_path,omitempty"`
 	AutoUpdate      *bool     `toml:"auto_update,omitempty"` // absent = on; false pins the installed version
+	PathSalt        string    `toml:"path_salt,omitempty"`   // hex; absent = generated in ~/.flockatime/path-salt
 	Activity        Activity  `toml:"activity"`
 	Projects        []Project `toml:"project,omitempty"`
 }

@@ -82,7 +82,7 @@ func TestHashLinesMatchesWalkCount(t *testing.T) {
 // returns the files by their order in the walk.
 func capture(t *testing.T, stateDir, root string) []snapshot.File {
 	t.Helper()
-	st, err := Load(stateDir, "demo")
+	st, err := Load(stateDir, "demo", "unsalted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,5 +163,92 @@ func TestFileName(t *testing.T) {
 	}
 	if got := fileName(".."); !strings.HasPrefix(got, "..-") {
 		t.Errorf(".. -> %s", got)
+	}
+}
+
+func TestChainAcrossLoads(t *testing.T) {
+	dir := t.TempDir()
+	trees := []string{"t1", "t2", "t2", "t3"}
+	prev := ""
+	for i, tree := range trees {
+		st, err := Load(dir, "demo", "unsalted")
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap := &snapshot.Snapshot{TreeHash: tree}
+		st.Chain(snap)
+		if snap.Seq != uint64(i+1) || snap.PrevTreeHash != prev {
+			t.Fatalf("capture %d: seq %d prev %q, want %d %q", i, snap.Seq, snap.PrevTreeHash, i+1, prev)
+		}
+		if err := st.Save(); err != nil {
+			t.Fatal(err)
+		}
+		prev = tree
+	}
+}
+
+// A capture that is only shown (`once`) must not advance the chain.
+func TestChainWithoutSaveDoesNotAdvance(t *testing.T) {
+	dir := t.TempDir()
+	for range 2 {
+		st, _ := Load(dir, "demo", "unsalted")
+		snap := &snapshot.Snapshot{TreeHash: "x"}
+		st.Chain(snap)
+		if snap.Seq != 1 {
+			t.Fatalf("seq %d, want 1", snap.Seq)
+		}
+	}
+}
+
+// A new path salt renames every file key: the line memory restarts as a
+// baseline (no counts) but the chain carries on.
+func TestSaltChangeRestartsLinesKeepsChain(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.go"), []byte("1\n2\n"), 0o644)
+	capture(t, dir, root)
+	st, _ := Load(dir, "demo", "unsalted")
+	st.Chain(&snapshot.Snapshot{TreeHash: "t1"})
+	st.Save()
+
+	st, err := Load(dir, "demo", SaltID([]byte("secret")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := snapshot.CaptureWith("demo", root, "test", snapshot.Options{Observer: st, PathSalt: []byte("secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := s.Files[0]; f.Added != 0 {
+		t.Fatalf("salt change reported %d added lines; want a quiet baseline", f.Added)
+	}
+	st.Chain(s)
+	if s.Seq < 2 || s.PrevTreeHash != "t1" {
+		t.Fatalf("chain broken by salt change: seq %d prev %q", s.Seq, s.PrevTreeHash)
+	}
+}
+
+func TestChangedHookOnlyForChangedFiles(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.go"), []byte("a\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "b.go"), []byte("b\n"), 0o644)
+	run := func() int {
+		st, _ := Load(dir, "demo", "unsalted")
+		n := 0
+		st.Changed = func(string, *snapshot.File) { n++ }
+		if _, err := snapshot.CaptureWith("demo", root, "test", snapshot.Options{Observer: st}); err != nil {
+			t.Fatal(err)
+		}
+		st.Save()
+		return n
+	}
+	if n := run(); n != 2 {
+		t.Fatalf("baseline: Changed called %d times, want 2", n)
+	}
+	os.WriteFile(filepath.Join(root, "a.go"), []byte("a\nmore\n"), 0o644)
+	if n := run(); n != 1 {
+		t.Fatalf("one edit: Changed called %d times, want 1", n)
+	}
+	if n := run(); n != 0 {
+		t.Fatalf("no edit: Changed called %d times, want 0", n)
 	}
 }

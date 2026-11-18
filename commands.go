@@ -13,7 +13,6 @@ import (
 
 	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/config"
-	"snapshot-agent/internal/linestate"
 	"snapshot-agent/internal/queue"
 	"snapshot-agent/internal/snapshot"
 	"snapshot-agent/internal/transport"
@@ -40,7 +39,13 @@ func cmdOnce(args []string) error {
 		if err != nil {
 			return err
 		}
-		s, err := captureLines(filepath.Base(dir), dir, false)
+		// No config is needed here, but if there is one its path_salt
+		// applies, so the hashes match what `run` sends.
+		c, err := newCapturer(optionalConfig())
+		if err != nil {
+			return err
+		}
+		s, err := c.capture(filepath.Base(dir), dir, false)
 		if err != nil {
 			return err
 		}
@@ -54,6 +59,10 @@ func cmdOnce(args []string) error {
 		if err != nil {
 			return err
 		}
+		c, err := newCapturer(cfg)
+		if err != nil {
+			return err
+		}
 		// Resolve projects the same way `run` does, so `once` shows what
 		// would actually be sent rather than only what was pinned by hand.
 		src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
@@ -61,7 +70,7 @@ func cmdOnce(args []string) error {
 			return err
 		}
 		for _, p := range activeProjects(cfg, src, time.Now().Add(-cfg.IdleAfter())) {
-			s, err := captureLines(p.Name, p.Path, false)
+			s, err := c.capture(p.Name, p.Path, false)
 			if err != nil {
 				return fmt.Errorf("project %q: %w", p.Name, err)
 			}
@@ -72,6 +81,19 @@ func cmdOnce(args []string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(snaps)
+}
+
+// optionalConfig is the config if there is a usable one, else nil.
+func optionalConfig() *config.Config {
+	path, err := configPath()
+	if err != nil {
+		return nil
+	}
+	cfg, err := config.Load(path, false)
+	if err != nil {
+		return nil
+	}
+	return cfg
 }
 
 // cmdRun is the daemon loop: capture every interval, send, and fall back to
@@ -108,7 +130,10 @@ func cmdRun(args []string) error {
 	defer q.Close()
 
 	client := transport.New(cfg.Endpoint, cfg.APIKey)
-	lastHash := make(map[string]string, len(cfg.Projects))
+	capt, err := newCapturer(cfg)
+	if err != nil {
+		return err
+	}
 	interval := time.Duration(cfg.IntervalSeconds) * time.Second
 	idleAfter := cfg.IdleAfter()
 	poll := time.Duration(cfg.Activity.PollSeconds) * time.Second
@@ -158,7 +183,7 @@ func cmdRun(args []string) error {
 			return nil
 		}
 		lastProjects = projects
-		tick(projects, client, q, lastHash)
+		tick(projects, client, q, capt)
 		return nil
 	}
 
@@ -237,18 +262,18 @@ func activeProjects(cfg *config.Config, src activity.Source, since time.Time) []
 
 // tick captures every project once, then sends the backlog and this round in a
 // single request. Anything that fails to leave the machine lands in the queue.
-func tick(projects []config.Project, client *transport.Client, q *queue.Queue, lastHash map[string]string) {
+func tick(projects []config.Project, client *transport.Client, q *queue.Queue, capt *capturer) {
 	fresh := make([]snapshot.Snapshot, 0, len(projects))
 
 	for _, p := range projects {
-		s, err := captureLines(p.Name, p.Path, true)
+		s, err := capt.capture(p.Name, p.Path, true)
 		if err != nil {
 			logf("project %q: capture failed: %v", p.Name, err)
 			continue
 		}
 		// Unchanged trees still report in, just without the file list, so
 		// the timeline stays dense without repeating itself.
-		if lastHash[p.Name] == s.TreeHash {
+		if s.PrevTreeHash == s.TreeHash {
 			fresh = append(fresh, s.AsUnchanged())
 			logf("project %q: unchanged (%d files)", p.Name, s.FileCount)
 		} else {
@@ -261,7 +286,6 @@ func tick(projects []config.Project, client *transport.Client, q *queue.Queue, l
 			logf("project %q: %d files, %d lines (+%d -%d), tree %s",
 				p.Name, s.FileCount, s.TotalLines, added, removed, short(s.TreeHash))
 		}
-		lastHash[p.Name] = s.TreeHash
 	}
 
 	backlog, err := q.Drain(batchLimit)
@@ -294,34 +318,6 @@ func tick(projects []config.Project, client *transport.Client, q *queue.Queue, l
 		}
 	}
 	logf("sent %d snapshot(s)", len(batch))
-}
-
-// captureLines captures a project with per-file line counts diffed against
-// the state saved by the previous capture. save makes this capture the new
-// baseline; `once` passes false so peeking never eats the daemon's diffs.
-// Losing the line state costs only the counts, never the snapshot.
-func captureLines(name, path string, save bool) (*snapshot.Snapshot, error) {
-	var (
-		obs snapshot.Observer
-		st  *linestate.State
-	)
-	if dir, err := linestate.Dir(); err == nil {
-		if st, err = linestate.Load(dir, name); err == nil {
-			obs = st
-		} else {
-			logf("project %q: line state unavailable: %v", name, err)
-		}
-	}
-	s, err := snapshot.CaptureWith(name, path, agentVersion, snapshot.Options{Observer: obs})
-	if err != nil {
-		return nil, err
-	}
-	if save && st != nil {
-		if err := st.Save(); err != nil {
-			logf("project %q: saving line state: %v", name, err)
-		}
-	}
-	return s, nil
 }
 
 // cmdDoctor validates the config and reports what the agent would do, without
