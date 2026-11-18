@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"snapshot-agent/internal/activity"
+	"snapshot-agent/internal/cadence"
 	"snapshot-agent/internal/config"
 	"snapshot-agent/internal/queue"
 	"snapshot-agent/internal/snapshot"
@@ -134,6 +135,9 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	capt.poller = cadence.New()
+	saves := &savePoll{p: capt.poller}
+	defer saves.stop()
 	interval := time.Duration(cfg.IntervalSeconds) * time.Second
 	idleAfter := cfg.IdleAfter()
 	poll := time.Duration(cfg.Activity.PollSeconds) * time.Second
@@ -192,6 +196,7 @@ func cmdRun(args []string) error {
 	// until the first heartbeat.
 	active := activity.Active(src, idleAfter, time.Now())
 	if active {
+		saves.start()
 		if err := capture(false); err != nil {
 			return err
 		}
@@ -206,6 +211,7 @@ func cmdRun(args []string) error {
 			case on && !active:
 				active = true
 				logf("waking --- activity detected")
+				saves.start()
 				// Capture immediately: waiting for the next capture tick
 				// would lose the first interval of the session.
 				if err := capture(false); err != nil {
@@ -218,6 +224,7 @@ func cmdRun(args []string) error {
 				active = false
 				logf("going dormant --- no activity for %s", idleAfter)
 				capture(true)
+				saves.stop()
 			}
 		case <-captureT.C:
 			if active {
@@ -275,16 +282,19 @@ func tick(projects []config.Project, client *transport.Client, q *queue.Queue, c
 		// the timeline stays dense without repeating itself.
 		if s.PrevTreeHash == s.TreeHash {
 			fresh = append(fresh, s.AsUnchanged())
-			logf("project %q: unchanged (%d files)", p.Name, s.FileCount)
+			logf("project %q: unchanged (%d files, %d saves, seq %d)", p.Name, s.FileCount, len(s.SaveTimes), s.Seq)
 		} else {
 			fresh = append(fresh, *s)
-			var added, removed int
+			var added, removed, fps int
 			for _, f := range s.Files {
 				added += f.Added
 				removed += f.Removed
+				if len(f.Fingerprints) > 0 {
+					fps++
+				}
 			}
-			logf("project %q: %d files, %d lines (+%d -%d), tree %s",
-				p.Name, s.FileCount, s.TotalLines, added, removed, short(s.TreeHash))
+			logf("project %q: %d files, %d lines (+%d -%d), %d saves, %d fingerprinted, seq %d, tree %s",
+				p.Name, s.FileCount, s.TotalLines, added, removed, len(s.SaveTimes), fps, s.Seq, short(s.TreeHash))
 		}
 	}
 

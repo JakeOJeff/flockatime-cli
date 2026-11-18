@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -9,17 +10,46 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"snapshot-agent/internal/cadence"
 	"snapshot-agent/internal/config"
+	"snapshot-agent/internal/fingerprint"
 	"snapshot-agent/internal/linestate"
 	"snapshot-agent/internal/snapshot"
 )
 
-// capturer holds what every capture needs beyond the walk: the path salt, and
-// the per-project state that carries line counts and the snapshot chain.
+// capturer holds what every capture needs beyond the walk: the path salt, the
+// per-project state that carries line counts and the snapshot chain, and in
+// `run` the save poller.
 type capturer struct {
 	salt   []byte
 	saltID string
+	// poller, when set, watches the files of each capture until the next and
+	// supplies the snapshot's save times. Only `run` has one.
+	poller *cadence.Poller
+	// fpFiles counts files fingerprinted since start, for doctor-style status.
+	fpFiles int
+}
+
+// observers fans one walk out to several Observers, in order.
+type observers []snapshot.Observer
+
+func (o observers) Observe(absPath string, f *snapshot.File) {
+	for _, x := range o {
+		x.Observe(absPath, f)
+	}
+}
+
+// fingerprintChanged is linestate's Changed hook: files whose content is new
+// or changed get winnowed fingerprints; unchanged files never get re-read for
+// them. A file that cannot be fingerprinted just goes without.
+func (c *capturer) fingerprintChanged(absPath string, f *snapshot.File) {
+	fp, err := fingerprint.File(absPath, fingerprint.MaxPerFile)
+	if err == nil && len(fp) > 0 {
+		f.Fingerprints = fp
+		c.fpFiles++
+	}
 }
 
 func newCapturer(cfg *config.Config) (*capturer, error) {
@@ -35,18 +65,37 @@ func newCapturer(cfg *config.Config) (*capturer, error) {
 // so looking never eats the daemon's diffs or skips a sequence number.
 // Losing the state costs counts and chain continuity, never the snapshot.
 func (c *capturer) capture(name, path string, save bool) (*snapshot.Snapshot, error) {
-	opt := snapshot.Options{PathSalt: c.salt}
-	var st *linestate.State
+	var (
+		obs observers
+		st  *linestate.State
+		col *cadence.Collector
+	)
 	if dir, err := linestate.Dir(); err == nil {
 		if st, err = linestate.Load(dir, name, c.saltID); err == nil {
-			opt.Observer = st
+			st.Changed = c.fingerprintChanged
+			obs = append(obs, st)
 		} else {
 			logf("project %q: line state unavailable: %v", name, err)
 		}
 	}
+	if c.poller != nil && save {
+		col = c.poller.Begin(name)
+		obs = append(obs, col)
+	}
+	opt := snapshot.Options{PathSalt: c.salt}
+	if len(obs) > 0 {
+		opt.Observer = obs
+	}
 	s, err := snapshot.CaptureWith(name, path, agentVersion, opt)
 	if err != nil {
 		return nil, err
+	}
+	if col != nil {
+		s.SaveTimes = col.Finish(time.Unix(s.CapturedAt, 0))
+	}
+	if n := s.FitFingerprints(snapshot.MaxSnapshotBytes); n > 0 {
+		logf("project %q: dropped fingerprints of %d file(s) to keep the snapshot under %d KB",
+			name, n, snapshot.MaxSnapshotBytes>>10)
 	}
 	if st != nil {
 		st.Chain(s)
@@ -123,4 +172,32 @@ func decodeSalt(s, where string) ([]byte, error) {
 		return nil, fmt.Errorf("%s must be at least 32 hex characters", where)
 	}
 	return b, nil
+}
+
+// saveEvery is how often the cadence poller stats known files between
+// captures: fine enough to show bursts and gaps inside a 2-minute interval,
+// and only stat calls.
+const saveEvery = 10 * time.Second
+
+// savePoll runs the poller only while a session is active, so a dormant agent
+// makes no filesystem calls at all. What it tracks survives a pause.
+type savePoll struct {
+	p      *cadence.Poller
+	cancel context.CancelFunc
+}
+
+func (s *savePoll) start() {
+	if s.cancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	go s.p.Run(ctx, saveEvery)
+}
+
+func (s *savePoll) stop() {
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+	}
 }

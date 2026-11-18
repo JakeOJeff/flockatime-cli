@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -277,5 +278,34 @@ func TestGitFileIsSkipped(t *testing.T) {
 	s, err := Capture("p", root, "test")
 	if err != nil || s.FileCount != 1 {
 		t.Fatalf("FileCount = %d (%v), want 1", s.FileCount, err)
+	}
+}
+
+func TestFitFingerprints(t *testing.T) {
+	s := &Snapshot{Project: "p"}
+	for i := range 400 {
+		fp := make([]uint64, 50)
+		for j := range fp {
+			fp[j] = 1<<52 + uint64(i*50+j)
+		}
+		s.Files = append(s.Files, File{PathHash: "h", ContentHash: "c", Added: i, Fingerprints: fp})
+	}
+	const max = 200 << 10
+	dropped := s.FitFingerprints(max)
+	b, _ := json.Marshal(s)
+	if dropped == 0 || len(b) > max {
+		t.Fatalf("dropped %d, size %d, want > 0 and <= %d", dropped, len(b), max)
+	}
+	if len(s.Files) != 400 {
+		t.Fatal("files were dropped, not just fingerprints")
+	}
+	// The least-changed files lose theirs first.
+	if s.Files[0].Fingerprints != nil || s.Files[399].Fingerprints == nil {
+		t.Fatal("dropped fingerprints from the wrong end")
+	}
+	// A small snapshot is left alone.
+	small := &Snapshot{Files: []File{{Fingerprints: []uint64{1}}}}
+	if small.FitFingerprints(max) != 0 || small.Files[0].Fingerprints == nil {
+		t.Fatal("small snapshot was trimmed")
 	}
 }
