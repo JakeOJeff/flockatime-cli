@@ -242,3 +242,40 @@ func TestCaptureCountsSkippedAndBytes(t *testing.T) {
 		t.Error("os and arch should be set")
 	}
 }
+
+func TestRevealFindsSaltedPath(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "src"), 0o755)
+	os.MkdirAll(filepath.Join(root, "node_modules", "x"), 0o755)
+	os.WriteFile(filepath.Join(root, "src", "main.rs"), []byte("fn main(){}\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "node_modules", "x", "main.rs"), []byte("x\n"), 0o644)
+	salt := []byte("0123456789abcdef")
+
+	s, err := CaptureWith("p", root, "test", Options{PathSalt: salt})
+	if err != nil || len(s.Files) != 1 {
+		t.Fatalf("capture: %v, %d files", err, len(s.Files))
+	}
+	got, err := Reveal(root, salt, s.Files[0].PathHash[:10])
+	if err != nil || len(got) != 1 || got[0] != "src/main.rs" {
+		t.Fatalf("Reveal = %v, %v; want [src/main.rs]", got, err)
+	}
+	// The wrong salt must not find it: that is the point of salting.
+	if got, _ := Reveal(root, []byte("another-salt-16b"), s.Files[0].PathHash); len(got) != 0 {
+		t.Fatalf("wrong salt revealed %v", got)
+	}
+	if HashPath("src/main.rs", salt) == HashPath("src/main.rs", nil) {
+		t.Fatal("salted and unsalted hashes are equal")
+	}
+}
+
+// Worktrees and submodules have a .git *file* pointing at the real repo; it is
+// plumbing, not source, and must not be recorded.
+func TestGitFileIsSkipped(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: /elsewhere\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
+	s, err := Capture("p", root, "test")
+	if err != nil || s.FileCount != 1 {
+		t.Fatalf("FileCount = %d (%v), want 1", s.FileCount, err)
+	}
+}

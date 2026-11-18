@@ -26,6 +26,8 @@ usage:
   snapshot-agent install       start the agent at every login, in the background
   snapshot-agent uninstall     stop starting it at login
   snapshot-agent devserver     a local endpoint that prints what it receives
+  snapshot-agent reveal HASH [--project NAME] [--dir PATH]
+                               show which local file a path_hash names
   snapshot-agent update [--check]
                                install the newest GitHub release now
   snapshot-agent version       print the agent version
@@ -55,6 +57,8 @@ func main() {
 		err = cmdInstall(os.Args[2:])
 	case "uninstall":
 		err = cmdUninstall(os.Args[2:])
+	case "reveal":
+		err = cmdReveal(os.Args[2:])
 	case "update":
 		err = cmdUpdate(os.Args[2:])
 	case "version":
