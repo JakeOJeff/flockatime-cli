@@ -123,7 +123,8 @@ func walk(root string, opt Options) (walkResult, error) {
 		}
 
 		// Symlinks, devices, sockets: recorded by neither hash nor count.
-		if !d.Type().IsRegular() {
+		// A .git file is a worktree or submodule pointer, not source.
+		if !d.Type().IsRegular() || d.Name() == ".git" {
 			return nil
 		}
 		if d.Name() == coverageFile {
