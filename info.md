@@ -4,10 +4,11 @@ A small background program that records the **shape** of your code folders over
 time — how many files, how long they are, what changed since last tick — and
 POSTs that to a server you choose.
 
-It never reads your code. File bytes go straight into SHA-256 and are thrown
-away; even the file *names* leave as hashes. What a collector sees is
-`9d2e4c...` is 412 lines and changed at 2:15pm — not what it's called or what's
-in it.
+It never sends your code. File bytes are only ever hashed, and the file *names*
+leave as salted hashes. What a collector sees is that `9d2e4c...` is 412 lines,
+gained 6 of them at 2:15pm and shares fingerprints with some other file. It
+never sees what the file is called or what's in it. The exact rules are in
+[Privacy, precisely](#privacy-precisely).
 
 Static Go binary, no CGO.
 
@@ -63,12 +64,18 @@ Run the same command again to upgrade or to switch keys.
     "commits": 27, "last_commit_at": 1788370000, "stashes": 0
   },
   "files": [
-    { "path_hash": "618cd5b8...", "content_hash": "52d9604e...", "lines": 10, "bytes": 298, "mtime": 1787687549 }
+    { "path_hash": "618cd5b8...", "content_hash": "52d9604e...", "lines": 10, "bytes": 298, "mtime": 1787687549,
+      "added": 6, "removed": 1, "tail": 6, "mid": 1, "fp": [301247718934, 902811256601] }
   ],
   "capture_ms": 41,
   "os": "windows",
   "arch": "amd64",
-  "agent_version": "0.2.2"
+  "agent_version": "0.3.0",
+  "seq": 42,
+  "prev": "a91c03d7e2b4...",
+  "saves": [14, 31, 33, 95],
+  "build_at": 1788371800,
+  "test_at": 1788371500
 }]
 ```
 
@@ -89,9 +96,51 @@ removed`). They come from a Myers diff of per-line hashes kept in
 sent. A project's first snapshot is the baseline and has no counts; `once`
 diffs against the saved state without updating it.
 
+- **`seq` / `prev`:** each project's snapshots are numbered 1, 2, 3..., and
+  `prev` is the `tree_hash` of the one before. A collector can check there
+  are no gaps or forks, so forging a session means faking a whole consistent
+  history, not one ping. The head lives in the state file. If that file is
+  deleted or corrupt the chain restarts at 1, which `doctor` reports. The
+  queue dropping its oldest entries past 5000 also leaves a gap.
+- **`saves`:** seconds after the previous capture at which a known file's
+  mtime moved. Between captures `run` stats the files of the last capture
+  every 10 s, only while you're active, and never opens them. Several saves of
+  one file between two polls count once.
+- **`build_at` / `test_at`:** the newest mtime at the top of skipped build
+  output (`dist/`, `target/`, an ignored `build/`, ...) and test caches
+  (`.pytest_cache/`, an ignored `coverage/`, `.coverage`), read with stat
+  only. Their contents are never walked.
+- **`fp`:** up to 50 winnowed fingerprints per file (the MOSS technique).
+  They are sent only for files whose content changed, or for every file on a
+  project's first capture. Comments and whitespace are stripped, every
+  30-token run is hashed, and the minimum hash of each window of 8 is kept.
+  A partial copy survives reformatting and still shares fingerprints with its
+  source. If fingerprints would push a snapshot past 1 MB they are dropped,
+  least-changed files first. The file list itself is never cut.
+
+### Privacy, precisely
+
 **Never on the wire:** file contents, file names, folder names, keystrokes,
 window titles, processes, screenshots, the clipboard. The only plaintext is the
 project name, the git branch, and the commit SHA.
+
+- **Path hashes are salted.** Each `path_hash` is HMAC-SHA256 of the path,
+  keyed with a secret that never leaves your machine: `path_salt` from the
+  config, or a random one created once in `~/.flockatime/path-salt`. Unsalted,
+  the hash of `src/main.rs` would be the same for everyone, and common names
+  could be recovered from a dictionary. The trade-off is that two machines
+  only produce matching path hashes if they share a `path_salt`. Upgrading
+  from 0.2 changes every `path_hash` and `tree_hash` once.
+- **Fingerprints are derived from content.** Building them means the file is
+  tokenized in memory. The tokens are hashed and discarded, and nothing else
+  is kept. A 30-token window can't be turned back into code. Anyone holding a
+  *candidate* text can confirm a match, though, and that is what makes copy
+  detection work.
+- **Line hashes stay local.** The per-line hashes behind `added`/`removed`
+  stay in `~/.flockatime/state` (mode 0600) and are never sent.
+- **`reveal` maps a hash back to a name, on your machine only.** If a reviewer
+  asks "what is `9d2e...`?", run `snapshot-agent reveal 9d2e4c18` to see which
+  file it is. Nothing is sent, and whether to share the answer is up to you.
 
 ## Try it
 
@@ -150,9 +199,10 @@ when it comes back.
 | `setup --endpoint URL --key KEY` | everything the install command does after downloading: check key, write config, enable WakaTime debug log, start at login |
 | `once [dir]` | one snapshot, printed as JSON, sends nothing. With a dir it needs no config |
 | `run` | the daemon: capture every interval, POST, queue to disk on failure |
-| `doctor` | validate config, probe the endpoint, list resolved projects. Sends nothing |
+| `doctor` | validate config, probe the endpoint, show whether the agent is running and polling, and per project the state file and fingerprint coverage. Sends nothing |
 | `devserver [port]` | a local collector that prints what it receives. Default `127.0.0.1:8787` |
 | `install` / `uninstall` | start (or stop) at login and now, hidden, no Administrator or sudo |
+| `reveal HASH [--project N] [--dir P]` | show which local file a `path_hash` names. Sends nothing |
 | `update [--check]` | install the newest GitHub release now (`run` also does this by itself) |
 | `version` | print the version |
 
@@ -170,6 +220,7 @@ api_key  = "your-key"                      # sent as: Authorization: Bearer ...
 interval_seconds = 300                     # default 300
 queue_path = "~/.snapshot-agent-queue.db"  # where failed sends wait
 auto_update = true                         # default; false pins the installed version
+path_salt = "..."                          # 32+ hex chars; share it to align path hashes across machines
 
 # Optional: capture only while you're actually editing, using WakaTime's
 # heartbeat files. Read-only — it cannot affect your WakaTime data.
