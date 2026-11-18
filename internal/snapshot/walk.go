@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	ignore "github.com/sabhiram/go-gitignore"
 )
@@ -12,10 +13,46 @@ import (
 // maxFileBytes is the per-file ceiling; larger files are skipped entirely.
 const maxFileBytes = 2 << 20 // 2 MiB
 
-// alwaysSkip are directory names skipped regardless of .gitignore.
+// alwaysSkip are directory names skipped regardless of .gitignore. Past the
+// first five, these are folders only tools write, so walking them as source
+// would record generated noise.
 var alwaysSkip = map[string]bool{
 	".git": true, "node_modules": true, "target": true, "dist": true, "vendor": true,
+	"__pycache__": true, ".pytest_cache": true, ".next": true, ".nuxt": true,
+	".svelte-kit": true, ".gradle": true, ".tox": true, ".nyc_output": true,
+	"htmlcov": true, ".parcel-cache": true, ".turbo": true,
 }
+
+// buildNames and testNames are skipped folders whose mtimes say the code was
+// built or tested, which a real session does and a replay usually does not.
+// They count only when the walk skips the folder: a build/ or bin/ that is
+// neither ignored nor in alwaysSkip is ordinary source.
+var (
+	buildNames = map[string]bool{
+		"dist": true, "target": true, "build": true, "out": true, "bin": true,
+		"obj": true, ".next": true, ".nuxt": true, ".svelte-kit": true,
+		".output": true, "__pycache__": true, ".gradle": true,
+		".parcel-cache": true, ".turbo": true,
+	}
+	testNames = map[string]bool{
+		".pytest_cache": true, "coverage": true, ".nyc_output": true,
+		"htmlcov": true, ".tox": true, ".jest-cache": true,
+	}
+)
+
+// buildPrefix catches CLion's per-profile folders (cmake-build-debug, ...).
+const buildPrefix = "cmake-build-"
+
+// coverageFile is coverage.py's data file; its mtime is test activity.
+const coverageFile = ".coverage"
+
+// Limits on the stat-only scan of a skipped build or test folder: the folder,
+// its children and grandchildren, at most activityStats stats in all. Tools
+// touch entries near the top on every run, so going deeper buys little.
+const (
+	activityDepth = 2
+	activityStats = 2000
+)
 
 // matcher is one .gitignore file, remembered with the directory it governs
 // (relative to the project root, slash-separated, "" for the root itself).
@@ -50,6 +87,8 @@ func walk(root string, opt Options) (walkResult, error) {
 		res      walkResult
 	)
 	obs := opt.Observer
+	// mtimes past this are clock-skew garbage and must not win the max.
+	latest := time.Now().Add(24 * time.Hour).Unix()
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -70,7 +109,13 @@ func walk(root string, opt Options) (walkResult, error) {
 		}
 
 		if d.IsDir() {
-			if alwaysSkip[d.Name()] || ignored(matchers, rel, true) {
+			if name := d.Name(); alwaysSkip[name] || ignored(matchers, rel, true) {
+				switch {
+				case buildNames[name] || strings.HasPrefix(name, buildPrefix):
+					res.buildAt = max(res.buildAt, newestMtime(path, latest))
+				case testNames[name]:
+					res.testAt = max(res.testAt, newestMtime(path, latest))
+				}
 				return fs.SkipDir
 			}
 			matchers = loadIgnore(matchers, root, rel)
@@ -80,6 +125,11 @@ func walk(root string, opt Options) (walkResult, error) {
 		// Symlinks, devices, sockets: recorded by neither hash nor count.
 		if !d.Type().IsRegular() {
 			return nil
+		}
+		if d.Name() == coverageFile {
+			if info, err := d.Info(); err == nil {
+				res.testAt = max(res.testAt, sane(info.ModTime().Unix(), latest))
+			}
 		}
 		if ignored(matchers, rel, false) {
 			return nil
@@ -113,6 +163,55 @@ func walk(root string, opt Options) (walkResult, error) {
 	}
 	res.files, res.skipped = files, skipped
 	return res, nil
+}
+
+// newestMtime is the newest sane mtime among dir and its entries down to
+// activityDepth, from at most activityStats stats. It lists directories but
+// never opens a file, and does not follow symlinks: DirEntry.IsDir is false
+// for a link, so a linked folder is stat'd but not descended.
+func newestMtime(dir string, latest int64) int64 {
+	budget := activityStats
+	var best int64
+	note := func(fi fs.FileInfo) {
+		budget--
+		best = max(best, sane(fi.ModTime().Unix(), latest))
+	}
+	if fi, err := os.Lstat(dir); err == nil {
+		note(fi)
+	}
+	var scan func(d string, depth int)
+	scan = func(d string, depth int) {
+		if depth > activityDepth || budget <= 0 {
+			return
+		}
+		f, err := os.Open(d)
+		if err != nil {
+			return
+		}
+		entries, _ := f.ReadDir(budget)
+		f.Close()
+		for _, e := range entries {
+			if budget <= 0 {
+				return
+			}
+			if fi, err := e.Info(); err == nil {
+				note(fi)
+			}
+			if e.IsDir() {
+				scan(filepath.Join(d, e.Name()), depth+1)
+			}
+		}
+	}
+	scan(dir, 1)
+	return best
+}
+
+// sane maps an mtime later than latest to 0, so skew cannot win a max.
+func sane(t, latest int64) int64 {
+	if t > latest {
+		return 0
+	}
+	return t
 }
 
 // loadIgnore appends the .gitignore in dir, if it has one. WalkDir descends
