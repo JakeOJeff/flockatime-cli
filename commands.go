@@ -13,9 +13,11 @@ import (
 
 	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/config"
+	"snapshot-agent/internal/linestate"
 	"snapshot-agent/internal/queue"
 	"snapshot-agent/internal/snapshot"
 	"snapshot-agent/internal/transport"
+	"snapshot-agent/internal/update"
 )
 
 // batchLimit caps how much backlog rides along with one request.
@@ -38,7 +40,7 @@ func cmdOnce(args []string) error {
 		if err != nil {
 			return err
 		}
-		s, err := snapshot.Capture(filepath.Base(dir), dir, agentVersion)
+		s, err := captureLines(filepath.Base(dir), dir, false)
 		if err != nil {
 			return err
 		}
@@ -59,7 +61,7 @@ func cmdOnce(args []string) error {
 			return err
 		}
 		for _, p := range activeProjects(cfg, src, time.Now().Add(-cfg.IdleAfter())) {
-			s, err := snapshot.Capture(p.Name, p.Path, agentVersion)
+			s, err := captureLines(p.Name, p.Path, false)
 			if err != nil {
 				return fmt.Errorf("project %q: %w", p.Name, err)
 			}
@@ -87,6 +89,16 @@ func cmdRun(args []string) error {
 	src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
 	if err != nil {
 		return err
+	}
+
+	// Update before opening the queue: the restarted process needs its lock.
+	update.CleanupOld()
+	upd := &autoUpdater{enabled: cfg.AutoUpdateEnabled()}
+	if exe, ok := upd.check(); ok {
+		return &restartError{exe: exe}
+	}
+	if !upd.enabled {
+		logf("auto-update is off")
 	}
 
 	q, err := queue.Open(cfg.QueuePath)
@@ -127,17 +139,27 @@ func cmdRun(args []string) error {
 	// capture resolves which projects are live right now and snapshots them.
 	// The list is rebuilt every time rather than fixed at startup, so opening
 	// a project WakaTime has never seen before needs no restart and no config.
-	capture := func(closing bool) {
+	//
+	// Before a capture (but never the closing one, which should not wait on a
+	// download) it checks for a new release, and returns a restartError when
+	// one was installed.
+	capture := func(closing bool) error {
+		if !closing {
+			if exe, ok := upd.check(); ok {
+				return &restartError{exe: exe}
+			}
+		}
 		projects := activeProjects(cfg, src, time.Now().Add(-idleAfter))
 		if len(projects) == 0 && closing {
 			projects = lastProjects
 		}
 		if len(projects) == 0 {
 			logf("nothing to capture --- WakaTime has not reported a file in a repository recently")
-			return
+			return nil
 		}
 		lastProjects = projects
 		tick(projects, client, q, lastHash)
+		return nil
 	}
 
 	// Start in whatever state the machine is already in: joining a session
@@ -145,7 +167,9 @@ func cmdRun(args []string) error {
 	// until the first heartbeat.
 	active := activity.Active(src, idleAfter, time.Now())
 	if active {
-		capture(false)
+		if err := capture(false); err != nil {
+			return err
+		}
 	} else {
 		logf("dormant --- no activity in the last %s; waiting for a heartbeat", idleAfter)
 	}
@@ -159,7 +183,9 @@ func cmdRun(args []string) error {
 				logf("waking --- activity detected")
 				// Capture immediately: waiting for the next capture tick
 				// would lose the first interval of the session.
-				capture(false)
+				if err := capture(false); err != nil {
+					return err
+				}
 				captureT.Reset(interval)
 			case !on && active:
 				// A last snapshot marks the end of the session, so the
@@ -170,7 +196,9 @@ func cmdRun(args []string) error {
 			}
 		case <-captureT.C:
 			if active {
-				capture(false)
+				if err := capture(false); err != nil {
+					return err
+				}
 			}
 		case <-stop:
 			logf("shutting down")
@@ -213,7 +241,7 @@ func tick(projects []config.Project, client *transport.Client, q *queue.Queue, l
 	fresh := make([]snapshot.Snapshot, 0, len(projects))
 
 	for _, p := range projects {
-		s, err := snapshot.Capture(p.Name, p.Path, agentVersion)
+		s, err := captureLines(p.Name, p.Path, true)
 		if err != nil {
 			logf("project %q: capture failed: %v", p.Name, err)
 			continue
@@ -225,7 +253,13 @@ func tick(projects []config.Project, client *transport.Client, q *queue.Queue, l
 			logf("project %q: unchanged (%d files)", p.Name, s.FileCount)
 		} else {
 			fresh = append(fresh, *s)
-			logf("project %q: %d files, %d lines, tree %s", p.Name, s.FileCount, s.TotalLines, short(s.TreeHash))
+			var added, removed int
+			for _, f := range s.Files {
+				added += f.Added
+				removed += f.Removed
+			}
+			logf("project %q: %d files, %d lines (+%d -%d), tree %s",
+				p.Name, s.FileCount, s.TotalLines, added, removed, short(s.TreeHash))
 		}
 		lastHash[p.Name] = s.TreeHash
 	}
@@ -260,6 +294,34 @@ func tick(projects []config.Project, client *transport.Client, q *queue.Queue, l
 		}
 	}
 	logf("sent %d snapshot(s)", len(batch))
+}
+
+// captureLines captures a project with per-file line counts diffed against
+// the state saved by the previous capture. save makes this capture the new
+// baseline; `once` passes false so peeking never eats the daemon's diffs.
+// Losing the line state costs only the counts, never the snapshot.
+func captureLines(name, path string, save bool) (*snapshot.Snapshot, error) {
+	var (
+		obs snapshot.Observer
+		st  *linestate.State
+	)
+	if dir, err := linestate.Dir(); err == nil {
+		if st, err = linestate.Load(dir, name); err == nil {
+			obs = st
+		} else {
+			logf("project %q: line state unavailable: %v", name, err)
+		}
+	}
+	s, err := snapshot.CaptureWith(name, path, agentVersion, obs)
+	if err != nil {
+		return nil, err
+	}
+	if save && st != nil {
+		if err := st.Save(); err != nil {
+			logf("project %q: saving line state: %v", name, err)
+		}
+	}
+	return s, nil
 }
 
 // cmdDoctor validates the config and reports what the agent would do, without

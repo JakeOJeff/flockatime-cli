@@ -26,6 +26,8 @@ usage:
   snapshot-agent install       start the agent at every login, in the background
   snapshot-agent uninstall     stop starting it at login
   snapshot-agent devserver     a local endpoint that prints what it receives
+  snapshot-agent update [--check]
+                               install the newest GitHub release now
   snapshot-agent version       print the agent version
 
 config: ~/.snapshot-agent.toml (mode 0600)
@@ -53,6 +55,8 @@ func main() {
 		err = cmdInstall(os.Args[2:])
 	case "uninstall":
 		err = cmdUninstall(os.Args[2:])
+	case "update":
+		err = cmdUpdate(os.Args[2:])
 	case "version":
 		fmt.Println(agentVersion)
 	case "-h", "--help", "help":
@@ -60,6 +64,13 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
+	}
+
+	if exe, ok := asRestart(err); ok {
+		if err := restartSelf(exe); err != nil {
+			fmt.Fprintln(os.Stderr, "snapshot-agent: restarting after update:", err)
+			os.Exit(1)
+		}
 	}
 
 	if err != nil {

@@ -42,6 +42,19 @@ type File struct {
 	Lines       int    `json:"lines"`
 	Bytes       int64  `json:"bytes"`
 	ModTime     int64  `json:"mtime"`
+	// Line-level change since the previous snapshot, filled in by an Observer
+	// (see internal/linestate). Zero on a project's first capture.
+	Added     int `json:"added,omitempty"`
+	Removed   int `json:"removed,omitempty"`
+	TailEdits int `json:"tail,omitempty"` // changed lines in the last ~10% of the file
+	MidEdits  int `json:"mid,omitempty"`
+}
+
+// Observer sees each recorded file during the walk, with its absolute path,
+// and may fill in fields of f. The path is handed over only here and is never
+// stored on File, so it cannot reach the payload or a log line by accident.
+type Observer interface {
+	Observe(absPath string, f *File)
 }
 
 // Git is the repository state at capture time, absent for non-repo projects.
@@ -83,8 +96,13 @@ func TreeHash(files []File) string {
 
 // Capture walks root and returns the snapshot for the named project.
 func Capture(name, root, agentVersion string) (*Snapshot, error) {
+	return CaptureWith(name, root, agentVersion, nil)
+}
+
+// CaptureWith is Capture with an Observer, which may be nil.
+func CaptureWith(name, root, agentVersion string, obs Observer) (*Snapshot, error) {
 	start := time.Now()
-	files, skipped, err := walk(root)
+	files, skipped, err := walk(root, obs)
 	if err != nil {
 		return nil, err
 	}

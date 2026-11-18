@@ -29,6 +29,7 @@ type Config struct {
 	APIKey          string    `toml:"api_key"`
 	IntervalSeconds int       `toml:"interval_seconds,omitzero"`
 	QueuePath       string    `toml:"queue_path,omitempty"`
+	AutoUpdate      *bool     `toml:"auto_update,omitempty"` // absent = on; false pins the installed version
 	Activity        Activity  `toml:"activity"`
 	Projects        []Project `toml:"project,omitempty"`
 }
@@ -201,6 +202,15 @@ func CheckEndpoint(endpoint string) error {
 	default:
 		return fmt.Errorf("endpoint %q must start with https://", endpoint)
 	}
+}
+
+// AutoUpdateEnabled is auto_update, defaulting to on. SNAPSHOT_AGENT_NO_UPDATE
+// turns it off for one run, e.g. while testing a local build.
+func (c *Config) AutoUpdateEnabled() bool {
+	if os.Getenv("SNAPSHOT_AGENT_NO_UPDATE") != "" {
+		return false
+	}
+	return c.AutoUpdate == nil || *c.AutoUpdate
 }
 
 // IdleAfter is how long the editor may stay quiet before the daemon goes

@@ -29,13 +29,13 @@ type matcher struct {
 // skipped rather than aborting the walk: an unreadable file should not cost
 // us the whole snapshot.
 func Walk(root string) ([]File, error) {
-	files, _, err := walk(root)
+	files, _, err := walk(root, nil)
 	return files, err
 }
 
 // walk is Walk that also counts the files it had to leave out: over the size
 // cap, or failing to stat or read.
-func walk(root string) ([]File, int, error) {
+func walk(root string, obs Observer) ([]File, int, error) {
 	var (
 		files    []File
 		matchers []matcher
@@ -86,13 +86,17 @@ func walk(root string) ([]File, int, error) {
 			skipped++
 			return nil
 		}
-		files = append(files, File{
+		f := File{
 			PathHash:    hashPath(rel),
 			ContentHash: contentHash,
 			Lines:       lines,
 			Bytes:       info.Size(),
 			ModTime:     info.ModTime().Unix(),
-		})
+		}
+		if obs != nil {
+			obs.Observe(path, &f)
+		}
+		files = append(files, f)
 		return nil
 	})
 	if err != nil {

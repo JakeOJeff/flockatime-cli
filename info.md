@@ -81,6 +81,14 @@ added and removed against `HEAD` (`git diff --shortstat`), commits on `HEAD`,
 the last commit's time, and stashes. `skipped_files` counts files left out for
 being over 2 MB or unreadable. `capture_ms` is how long the walk and git took.
 
+Each changed file also carries `added`, `removed`, `tail` and `mid`: lines
+added and removed since the last snapshot, split by where they fall (`tail` is
+the last ~10% of the file, `mid` everything before; `tail + mid = added +
+removed`). They come from a Myers diff of per-line hashes kept in
+`~/.flockatime/state/<project>.bin` --- 64-bit hashes only, never text, never
+sent. A project's first snapshot is the baseline and has no counts; `once`
+diffs against the saved state without updating it.
+
 **Never on the wire:** file contents, file names, folder names, keystrokes,
 window titles, processes, screenshots, the clipboard. The only plaintext is the
 project name, the git branch, and the commit SHA.
@@ -145,6 +153,7 @@ when it comes back.
 | `doctor` | validate config, probe the endpoint, list resolved projects. Sends nothing |
 | `devserver [port]` | a local collector that prints what it receives. Default `127.0.0.1:8787` |
 | `install` / `uninstall` | start (or stop) at login and now, hidden, no Administrator or sudo |
+| `update [--check]` | install the newest GitHub release now (`run` also does this by itself) |
 | `version` | print the version |
 
 Config lives at `~/.snapshot-agent.toml`, or wherever `SNAPSHOT_AGENT_CONFIG`
@@ -160,6 +169,7 @@ endpoint = "https://collect.example.com"   # "/v1/snapshots" is appended
 api_key  = "your-key"                      # sent as: Authorization: Bearer ...
 interval_seconds = 300                     # default 300
 queue_path = "~/.snapshot-agent-queue.db"  # where failed sends wait
+auto_update = true                         # default; false pins the installed version
 
 # Optional: capture only while you're actually editing, using WakaTime's
 # heartbeat files. Read-only — it cannot affect your WakaTime data.
@@ -224,6 +234,15 @@ git tag v0.2.0 && git push origin v0.2.0
 The release workflow tests, builds every platform, and publishes archives with
 version-less names (`snapshot-agent_windows_amd64.zip`, ...) plus `SHA256SUMS`,
 which is what the install commands download.
+
+Running agents pick a release up by themselves: `run` checks GitHub when it
+starts and before captures (at most hourly), and if there is a newer `X.Y.Z` it
+downloads this platform's archive, checks it against `SHA256SUMS`, runs the new
+binary's `version` to confirm it, swaps it in place and restarts. Any failure
+keeps the old binary. `snapshot-agent update` does the same by hand
+(`--check` only reports); `auto_update = false` or `SNAPSHOT_AGENT_NO_UPDATE=1`
+turns it off. A tag that isn't plain `X.Y.Z` (e.g. `v0.3.0-rc1`) is never
+installed automatically.
 
 ## Tests
 
