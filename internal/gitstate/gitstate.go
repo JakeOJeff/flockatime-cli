@@ -39,6 +39,10 @@ type State struct {
 	Commits      int   // reachable from HEAD
 	LastCommitAt int64 // committer time of HEAD, unix seconds
 	Stashes      int
+
+	// AICommits counts, among the last aiCommitWindow commits, those whose
+	// author or message names an AI agent. Messages are scanned, not kept.
+	AICommits int
 }
 
 // Read returns the state of the repo at root, or (nil, nil) if root has no
@@ -91,6 +95,10 @@ func Read(root string) (*State, error) {
 		}
 		if out, err := run(root, "log", "-1", "--no-show-signature", "--format=%ct", "HEAD"); err == nil {
 			s.LastCommitAt, _ = strconv.ParseInt(out, 10, 64)
+		}
+		if out, err := run(root, "log", "-n", strconv.Itoa(aiCommitWindow), "--no-show-signature",
+			"--format=%an <%ae>%n%B%x1e", "HEAD"); err == nil {
+			s.AICommits = CountAICommits(out)
 		}
 	}
 	// Fails when nothing is stashed, which leaves Stashes at 0.
@@ -212,4 +220,43 @@ func runRaw(dir string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// aiCommitWindow bounds the history scanned for AI markers, so a huge repo
+// costs no more than a small one.
+const aiCommitWindow = 2000
+
+// aiMarkers are lower-cased substrings that tools put in the commits they make
+// or help make: Claude Code's trailer and footer, aider's author suffix and
+// message prefix, Copilot's and Cursor's co-author lines, Codex's.
+var aiMarkers = []string{
+	"noreply@anthropic.com",
+	"co-authored-by: claude",
+	"generated with [claude code]",
+	"(aider)",
+	"aider: ",
+	"co-authored-by: copilot",
+	"copilot@github.com",
+	"cursoragent@cursor.com",
+	"co-authored-by: cursor",
+	"co-authored-by: codex",
+	"noreply@openai.com",
+	"co-authored-by: gemini",
+	"co-authored-by: devin",
+}
+
+// CountAICommits counts the records of `git log --format=%an <%ae>%n%B%x1e`
+// that carry any AI marker.
+func CountAICommits(log string) int {
+	n := 0
+	for _, rec := range strings.Split(log, "\x1e") {
+		r := strings.ToLower(rec)
+		for _, m := range aiMarkers {
+			if strings.Contains(r, m) {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }

@@ -48,6 +48,29 @@ type Snapshot struct {
 	// (.pytest_cache/, coverage/...). Their contents are never walked.
 	BuildTouchedAt int64 `json:"build_at,omitempty"`
 	TestTouchedAt  int64 `json:"test_at,omitempty"`
+
+	// AI is what AI coding agents contributed, from their transcripts (see
+	// internal/aitrace). Absent when no agent has touched the project.
+	AI *AI `json:"ai,omitempty"`
+}
+
+// AI is a project's AI attribution and the AI activity since the previous
+// snapshot. Lines and Files describe the tree as captured; Writes and Minutes
+// are new since the last snapshot sent for this project.
+type AI struct {
+	Lines   int            `json:"lines"`             // lines that still match what an agent wrote
+	Files   int            `json:"files"`             // files with any such line
+	Writes  []AIWrite      `json:"writes,omitempty"`  // agent file writes, oldest first
+	Minutes []int64        `json:"minutes,omitempty"` // unix minute starts an AI session was live here
+	Tools   map[string]int `json:"tools,omitempty"`   // lines written per tool (0: session only)
+}
+
+// AIWrite is one agent writing into one file.
+type AIWrite struct {
+	At       int64  `json:"at"`
+	Tool     string `json:"tool"`
+	Lines    int    `json:"lines"`
+	PathHash string `json:"path_hash"`
 }
 
 // File is one recorded file. PathHash holds a hash of the project-relative
@@ -64,6 +87,9 @@ type File struct {
 	Removed   int `json:"removed,omitempty"`
 	TailEdits int `json:"tail,omitempty"` // changed lines in the last ~10% of the file
 	MidEdits  int `json:"mid,omitempty"`
+	// AILines is how many of the file's lines match lines an AI agent wrote
+	// into it and nobody has changed since.
+	AILines int `json:"ai_lines,omitempty"`
 	// Fingerprints are winnowed k-gram hashes of the normalized source (see
 	// internal/fingerprint), sent only for files whose content changed.
 	Fingerprints []uint64 `json:"fp,omitempty"`
@@ -93,6 +119,9 @@ type Git struct {
 	Commits      int    `json:"commits"`
 	LastCommitAt int64  `json:"last_commit_at,omitempty"`
 	Stashes      int    `json:"stashes"`
+	// AICommits counts recent commits whose message or author names an AI
+	// agent (Co-Authored-By: Claude, aider, Copilot...).
+	AICommits int `json:"ai_commits,omitempty"`
 }
 
 // TreeHash is SHA-256 over the sorted "path_hash:content_hash" lines. Sorting
@@ -161,6 +190,7 @@ func CaptureWith(name, root, agentVersion string, opt Options) (*Snapshot, error
 			Staged: g.Staged, Modified: g.Modified, Untracked: g.Untracked, Conflicted: g.Conflicted,
 			Insertions: g.Insertions, Deletions: g.Deletions,
 			Commits: g.Commits, LastCommitAt: g.LastCommitAt, Stashes: g.Stashes,
+			AICommits: g.AICommits,
 		}
 	}
 	s.CaptureMs = time.Since(start).Milliseconds()

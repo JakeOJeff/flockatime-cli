@@ -157,3 +157,12 @@ func TestParseShortstat(t *testing.T) {
 		}
 	}
 }
+
+func TestCountAICommits(t *testing.T) {
+	log := "Ann <ann@x.io>\nFix parser\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>\n\x1e\n" +
+		"Bob (aider) <bob@x.io>\naider: add tests\n\x1e\n" +
+		"Cy <cy@x.io>\nPlain human commit\n\x1e\n"
+	if got := CountAICommits(log); got != 2 {
+		t.Fatalf("CountAICommits = %d, want 2", got)
+	}
+}

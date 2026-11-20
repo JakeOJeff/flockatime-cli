@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"snapshot-agent/internal/aitrace"
 	"snapshot-agent/internal/cadence"
 	"snapshot-agent/internal/config"
 	"snapshot-agent/internal/fingerprint"
@@ -30,6 +31,12 @@ type capturer struct {
 	poller *cadence.Poller
 	// fpFiles counts files fingerprinted since start, for doctor-style status.
 	fpFiles int
+
+	// ai is the AI trace, nil when [ai] disabled is set. aiSynced is when its
+	// transcripts were last read, so several projects in one tick share a read.
+	ai       *aitrace.Store
+	aiSrc    aitrace.Sources
+	aiSynced time.Time
 }
 
 // observers fans one walk out to several Observers, in order.
@@ -57,7 +64,14 @@ func newCapturer(cfg *config.Config) (*capturer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &capturer{salt: salt, saltID: linestate.SaltID(salt)}, nil
+	c := &capturer{salt: salt, saltID: linestate.SaltID(salt)}
+	if cfg == nil || !cfg.AI.Disabled {
+		if p, err := aitrace.Path(); err == nil {
+			c.ai = aitrace.Load(p)
+			c.aiSrc = aitrace.DefaultSources()
+		}
+	}
+	return c, nil
 }
 
 // capture snapshots one project with line counts and a chain link. save makes
@@ -82,6 +96,12 @@ func (c *capturer) capture(name, path string, save bool) (*snapshot.Snapshot, er
 		col = c.poller.Begin(name)
 		obs = append(obs, col)
 	}
+	var aiObs *aitrace.Observer
+	if c.ai != nil {
+		c.syncAI()
+		aiObs = &aitrace.Observer{Store: c.ai}
+		obs = append(obs, aiObs)
+	}
 	opt := snapshot.Options{PathSalt: c.salt}
 	if len(obs) > 0 {
 		opt.Observer = obs
@@ -92,6 +112,12 @@ func (c *capturer) capture(name, path string, save bool) (*snapshot.Snapshot, er
 	}
 	if col != nil {
 		s.SaveTimes = col.Finish(time.Unix(s.CapturedAt, 0))
+	}
+	if aiObs != nil {
+		s.AI = c.ai.Report(path, aiObs, func(rel string) string { return snapshot.HashPath(rel, c.salt) }, save)
+		if err := c.ai.Save(); err != nil {
+			logf("saving AI trace: %v", err)
+		}
 	}
 	if n := s.FitFingerprints(snapshot.MaxSnapshotBytes); n > 0 {
 		logf("project %q: dropped fingerprints of %d file(s) to keep the snapshot under %d KB",
@@ -200,4 +226,15 @@ func (s *savePoll) stop() {
 		s.cancel()
 		s.cancel = nil
 	}
+}
+
+// syncAI reads what AI transcripts gained since the last read. Captures in the
+// same tick share one read; the cursors are saved with the store, so a restart
+// does not re-read months of transcripts.
+func (c *capturer) syncAI() {
+	if c.ai == nil || time.Since(c.aiSynced) < 5*time.Second {
+		return
+	}
+	c.ai.Sync(c.aiSrc)
+	c.aiSynced = time.Now()
 }

@@ -32,6 +32,7 @@ type Config struct {
 	AutoUpdate      *bool     `toml:"auto_update,omitempty"` // absent = on; false pins the installed version
 	PathSalt        string    `toml:"path_salt,omitempty"`   // hex; absent = generated in ~/.flockatime/path-salt
 	Activity        Activity  `toml:"activity"`
+	AI              AI        `toml:"ai,omitempty"`
 	Projects        []Project `toml:"project,omitempty"`
 }
 
@@ -43,6 +44,12 @@ type Activity struct {
 	IdleMultiplier int    `toml:"idle_multiplier,omitzero"`
 	PollSeconds    int    `toml:"poll_seconds,omitzero"`
 	WakaTimeDir    string `toml:"wakatime_dir,omitempty"`
+}
+
+// AI controls attribution from AI coding agents' transcripts. It is on by
+// default; with it on, AI sessions also count as activity and name projects.
+type AI struct {
+	Disabled bool `toml:"disabled,omitempty"`
 }
 
 // Project is one watched directory.
@@ -137,8 +144,9 @@ func (c *Config) Validate(requireEndpoint bool) error {
 
 	// No [[project]] entries is normal now: with the wakatime source, the
 	// projects are whatever WakaTime saw you editing, discovered at runtime.
-	if len(c.Projects) == 0 && c.Activity.Source != "wakatime" {
-		return fmt.Errorf("no [[project]] entries, and activity source %q cannot discover any; either list projects or set source = \"wakatime\"", c.Activity.Source)
+	// AI sessions name projects too, unless [ai] is disabled.
+	if len(c.Projects) == 0 && c.Activity.Source != "wakatime" && c.AI.Disabled {
+		return fmt.Errorf("no [[project]] entries, and with [ai] disabled activity source %q cannot discover any; list projects, set source = \"wakatime\", or re-enable [ai]", c.Activity.Source)
 	}
 	return nil
 }
