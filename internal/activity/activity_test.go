@@ -22,11 +22,6 @@ func touch(t *testing.T, dir, name string, age time.Duration) {
 
 // fixed is a Source frozen at one moment, for testing the Active boundary
 // without touching the filesystem.
-type fixed time.Time
-
-func (f fixed) LastActivity() time.Time { return time.Time(f) }
-func (fixed) Describe() string          { return "fixed" }
-
 func TestWakaTimeUsesNewestHeartbeatFile(t *testing.T) {
 	dir := t.TempDir()
 	touch(t, dir, "wakatime-internal.cfg", 10*time.Minute)
@@ -98,5 +93,44 @@ func TestNewRejectsUnknownSource(t *testing.T) {
 	}
 	if _, err := New("", t.TempDir()); err != nil {
 		t.Fatalf("empty source should default to always: %v", err)
+	}
+}
+
+type fixed time.Time
+
+func (f fixed) LastActivity() time.Time { return time.Time(f) }
+func (fixed) Describe() string          { return "fixed" }
+
+func TestAnyTakesNewestAndFlattens(t *testing.T) {
+	old, recent := time.Now().Add(-time.Hour), time.Now().Add(-time.Minute)
+	a := Any{fixed(old), Any{fixed(time.Time{}), fixed(recent)}}
+	if got := a.LastActivity(); !got.Equal(recent) {
+		t.Fatalf("LastActivity = %v, want the newest source's %v", got, recent)
+	}
+	if !Active(a, 5*time.Minute, time.Now()) {
+		t.Fatal("one recent source should make Any active")
+	}
+	if n := len(Flatten(a)); n != 3 {
+		t.Fatalf("Flatten = %d sources, want 3", n)
+	}
+}
+
+func TestProjectForFolderAndFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "repo", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "repo", "src")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(root, "repo"), sub, filepath.Join(sub, "main.go")} {
+		got, ok := ProjectFor(p)
+		if !ok || got.Name != "repo" || got.Path != filepath.Join(root, "repo") {
+			t.Fatalf("ProjectFor(%s) = %+v, %v", p, got, ok)
+		}
+	}
+	if _, ok := ProjectFor(root); ok {
+		t.Fatal("a folder outside any repository resolved to a project")
 	}
 }

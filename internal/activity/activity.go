@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -75,6 +76,40 @@ func New(name, wakatimeDir string) (Source, error) {
 		}
 		return WakaTime{Dir: wakatimeDir}, nil
 	default:
-		return nil, fmt.Errorf("unknown activity source %q (want \"wakatime\" or \"always\")", name)
+		return nil, fmt.Errorf("unknown activity source %q (want \"wakatime\", \"ai\" or \"always\")", name)
 	}
+}
+
+// Any is active when any of its sources is: the newest activity wins. It lets
+// AI agent sessions wake the agent even where WakaTime is not installed.
+type Any []Source
+
+func (a Any) LastActivity() time.Time {
+	var newest time.Time
+	for _, s := range a {
+		if t := s.LastActivity(); t.After(newest) {
+			newest = t
+		}
+	}
+	return newest
+}
+
+func (a Any) Describe() string {
+	parts := make([]string, len(a))
+	for i, s := range a {
+		parts[i] = s.Describe()
+	}
+	return strings.Join(parts, " + ")
+}
+
+// Flatten lists the sources inside src, unwrapping Any.
+func Flatten(src Source) []Source {
+	if a, ok := src.(Any); ok {
+		var out []Source
+		for _, s := range a {
+			out = append(out, Flatten(s)...)
+		}
+		return out
+	}
+	return []Source{src}
 }

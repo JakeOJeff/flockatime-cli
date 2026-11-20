@@ -32,17 +32,20 @@ release's `SHA256SUMS`, puts it in `~/.flockatime/bin`, and runs
 `snapshot-agent setup`, which:
 
 1. checks the key with the server, before writing anything;
-2. writes `~/.snapshot-agent.toml` with `[activity] source = "wakatime"`;
-3. turns on `debug = true` in `~/.wakatime.cfg`, so the agent can see which
-   file you are editing (nothing about your heartbeats changes);
+2. if WakaTime is installed, turns on `debug = true` in `~/.wakatime.cfg`, so
+   the agent can see which file you are editing (nothing about your
+   heartbeats changes);
+3. writes `~/.snapshot-agent.toml` with `[activity] source = "wakatime"`, or
+   `source = "ai"` when there is no WakaTime;
 4. starts the agent now and at every login --- a hidden Startup item on
    Windows, a LaunchAgent on macOS, a systemd user unit on Linux.
 
-From then on it works like Hackatime: there is no project list. Whatever git
-repo you edit is snapshotted while you work and left alone when you stop, under
-the same name Hackatime shows (a `.wakatime-project` file wins over the folder
-name). Hackatime must already be set up on the machine; if it is not, setup
-says so --- install it, then run the command again.
+From then on there is no project list. Whatever git repo you edit, or have
+an AI agent (Claude Code, Codex) work in, is snapshotted while you work and
+left alone when you stop. It uses the same name Hackatime shows (a
+`.wakatime-project` file wins over the folder name). Hackatime is optional.
+Without it, only AI sessions wake the agent, so coding you do entirely by
+hand isn't captured until you install it and run the command again.
 
 Run the same command again to upgrade or to switch keys.
 
@@ -61,11 +64,11 @@ Run the same command again to upgrade or to switch keys.
     "head": "eb4cf53b...", "branch": "main", "dirty": true, "ahead": 0, "behind": 0,
     "staged": 0, "modified": 4, "untracked": 1, "conflicted": 0,
     "insertions": 222, "deletions": 33,
-    "commits": 27, "last_commit_at": 1788370000, "stashes": 0
+    "commits": 27, "last_commit_at": 1788370000, "stashes": 0, "ai_commits": 9
   },
   "files": [
     { "path_hash": "618cd5b8...", "content_hash": "52d9604e...", "lines": 10, "bytes": 298, "mtime": 1787687549,
-      "added": 6, "removed": 1, "tail": 6, "mid": 1, "fp": [301247718934, 902811256601] }
+      "added": 6, "removed": 1, "tail": 6, "mid": 1, "ai_lines": 7, "fp": [301247718934, 902811256601] }
   ],
   "capture_ms": 41,
   "os": "windows",
@@ -75,7 +78,13 @@ Run the same command again to upgrade or to switch keys.
   "prev": "a91c03d7e2b4...",
   "saves": [14, 31, 33, 95],
   "build_at": 1788371800,
-  "test_at": 1788371500
+  "test_at": 1788371500,
+  "ai": {
+    "lines": 2815, "files": 27,
+    "writes": [{ "at": 1788371620, "tool": "claude-code", "lines": 40, "path_hash": "618cd5b8..." }],
+    "minutes": [1788371580, 1788371640],
+    "tools": { "claude-code": 40, "codex": 0 }
+  }
 }]
 ```
 
@@ -118,11 +127,54 @@ diffs against the saved state without updating it.
   source. If fingerprints would push a snapshot past 1 MB they are dropped,
   least-changed files first. The file list itself is never cut.
 
+### AI attribution
+
+The agent reads the transcripts that AI coding agents already keep on disk
+(Claude Code in `~/.claude/projects`, Codex in `~/.codex/sessions`). Every
+file write an agent made is in them: Write/Edit/MultiEdit calls,
+`apply_patch` patches, and shell heredocs (`cat > f <<EOF`). For each write
+it keeps a hash of every line the agent produced, under the file it went
+into. Each transcript is read once, from where the last read stopped. The
+first read covers all your history and takes a few seconds.
+
+- **`ai_lines`** (per file) counts lines that still match a line an agent
+  wrote into *that* file. Matching ignores leading and trailing whitespace,
+  so re-indenting a line keeps it attributed. Changing a line makes it the
+  person's. Short generic lines (`}`, `end`, `)`) count only when they sit
+  next to an attributed line, so your closing brace is never credited to an
+  agent that wrote one somewhere else.
+- **`ai.lines` / `ai.files`** total those for the project as captured.
+- **`ai.writes`** are the agent writes since the last snapshot of this
+  project: when, which tool, how many lines, which file (as a `path_hash`).
+  At most 500 per snapshot, the latest kept.
+- **`ai.minutes`** are the minutes (unix time, start of minute) in which an
+  agent session was live in this repository, whether it was writing,
+  reading, running commands or waiting on a prompt. Count them to get AI
+  time. Compare them with `saves` and WakaTime time to see how much of a
+  session the person drove.
+- **`ai.tools`** gives lines written per tool. 0 means the tool was only in
+  session here.
+- **`git.ai_commits`** counts commits among the last 2000 whose author or
+  message carries an AI marker (`Co-Authored-By: Claude`, aider's
+  `(aider)`, Copilot, Cursor, Codex). Messages are scanned, never sent.
+
+AI sessions also count as activity and name projects. A repository an agent
+works in gets snapshotted without WakaTime and without a `[[project]]`
+entry. Hackatime is optional now.
+
+**What it can't see:** completions accepted inline in an editor (Copilot tab
+completions, Cursor Tab), code pasted from a chat window, and agents whose
+transcripts aren't read yet (Cursor's agent, Gemini CLI, aider). It also
+can't see a transcript that was deleted before the agent read it. Under
+`run` that window is a few seconds. A collector can still spot these the way
+it spots pastes: a lot of `added` lines with few `saves` and no `ai.writes`.
+
 ### Privacy, precisely
 
 **Never on the wire:** file contents, file names, folder names, keystrokes,
 window titles, processes, screenshots, the clipboard. The only plaintext is the
-project name, the git branch, and the commit SHA.
+project name, the git branch, and the commit SHA. AI attribution stays inside
+this rule: it sends counts, times, tool names and path hashes.
 
 - **Path hashes are salted.** Each `path_hash` is HMAC-SHA256 of the path,
   keyed with a secret that never leaves your machine: `path_salt` from the
@@ -138,6 +190,13 @@ project name, the git branch, and the commit SHA.
   detection work.
 - **Line hashes stay local.** The per-line hashes behind `added`/`removed`
   stay in `~/.flockatime/state` (mode 0600) and are never sent.
+- **AI transcripts are read, not sent.** They hold your prompts and the
+  agents' code, so reading them is a step past hashing file contents. What is
+  kept from them, in `~/.flockatime/state/ai.gob` (mode 0600), is: transcript
+  read offsets, per-file sets of line hashes, and an event log of
+  times, tools, line counts, and local file and folder paths. Those paths
+  never leave the machine; only their salted `path_hash` does. Turn it all
+  off with `[ai] disabled = true`.
 - **`reveal` maps a hash back to a name, on your machine only.** If a reviewer
   asks "what is `9d2e...`?", run `snapshot-agent reveal 9d2e4c18` to see which
   file it is. Nothing is sent, and whether to share the answer is up to you.
@@ -227,7 +286,13 @@ path_salt = "..."                          # 32+ hex chars; share it to align pa
 [activity]
 source = "wakatime"
 
-# Optional with source = "wakatime", required otherwise.
+# AI attribution is on by default. This turns it off, and stops AI sessions
+# from waking the agent and naming projects.
+# [ai]
+# disabled = true
+
+# Optional: WakaTime and AI sessions both find projects on their own.
+# Required only with source = "always" and [ai] disabled.
 [[project]]
 name = "demo"
 path = "~/src/demo"
@@ -238,6 +303,11 @@ file you're editing, so the agent snapshots that repository, wakes on your first
 heartbeat, and goes dormant ten minutes after you stop. It needs `debug = true`
 under `[settings]` in `~/.wakatime.cfg` to see which file you're in; `doctor`
 says so if it's missing.
+
+With `source = "ai"`, AI agent sessions alone decide when the agent is
+active and which projects it captures. Use it on a machine without WakaTime.
+With either source, AI sessions also wake the agent and add their projects
+unless `[ai] disabled = true`.
 
 ## The collector
   

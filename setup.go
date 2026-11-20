@@ -58,14 +58,16 @@ func cmdSetup(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeSetupConfig(path, *endpoint, *key, *interval); err != nil {
+	// 2b. WakaTime's debug log, one way the agent learns which project you
+	//     are in. Nothing about your heartbeats changes. Without WakaTime, AI
+	//     agent sessions are the activity source instead.
+	wakaReady := enableWakaTimeDebug()
+
+	// 3. The config.
+	if err := writeSetupConfig(path, *endpoint, *key, *interval, wakaReady); err != nil {
 		return err
 	}
 	fmt.Printf("config:   %s\n", path)
-
-	// 3. WakaTime's debug log, which is how the agent learns which project
-	//    you are in. Nothing about your heartbeats changes.
-	wakaReady := enableWakaTimeDebug()
 
 	// 4. Run at login, and now.
 	if *noStart {
@@ -81,11 +83,15 @@ func cmdSetup(args []string) error {
 		return err
 	}
 
-	fmt.Printf("\ndone. Code in any git repo with Hackatime running and it shows up on\n")
-	fmt.Printf("%s within a couple of minutes.\n", *endpoint)
+	if wakaReady {
+		fmt.Printf("\ndone. Code in any git repo with Hackatime running, or with an AI agent,\n")
+	} else {
+		fmt.Printf("\ndone. Code in any git repo with an AI agent (Claude Code, Codex)\n")
+	}
+	fmt.Printf("and it shows up on %s within a couple of minutes.\n", *endpoint)
 	if !wakaReady {
-		fmt.Printf("\nOne step left: install Hackatime (https://hackatime.hackclub.com/setup),\n")
-		fmt.Printf("then run this installer again so the agent can follow it.\n")
+		fmt.Printf("\nTo track coding without an agent too, install Hackatime\n")
+		fmt.Printf("(https://hackatime.hackclub.com/setup) and run this installer again.\n")
 	}
 	fmt.Printf("\nCheck on it any time with: snapshot-agent doctor\n")
 	return nil
@@ -94,7 +100,7 @@ func cmdSetup(args []string) error {
 // writeSetupConfig writes the agent config for the one-command install. An
 // existing config keeps its hand-pinned projects and queue location; only the
 // connection and activity settings are replaced.
-func writeSetupConfig(path, endpoint, key string, interval int) error {
+func writeSetupConfig(path, endpoint, key string, interval int, wakatime bool) error {
 	var cfg config.Config
 	if _, err := toml.DecodeFile(path, &cfg); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		// An unreadable config is replaced, but kept alongside for reference.
@@ -107,11 +113,14 @@ func writeSetupConfig(path, endpoint, key string, interval int) error {
 	cfg.Endpoint = endpoint
 	cfg.APIKey = key
 	cfg.IntervalSeconds = interval
-	cfg.Activity.Source = "wakatime"
+	cfg.Activity.Source = "ai"
+	if wakatime {
+		cfg.Activity.Source = "wakatime" // AI sessions join it unless [ai] is disabled
+	}
 
 	var buf bytes.Buffer
 	buf.WriteString("# Written by `snapshot-agent setup`. Re-run the installer to change the key.\n")
-	buf.WriteString("# Projects come from WakaTime/Hackatime; add [[project]] entries to pin more.\n\n")
+	buf.WriteString("# Projects come from WakaTime/Hackatime and AI agent sessions; add [[project]] entries to pin more.\n\n")
 	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
 		return err
 	}

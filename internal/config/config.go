@@ -145,6 +145,9 @@ func (c *Config) Validate(requireEndpoint bool) error {
 	// No [[project]] entries is normal now: with the wakatime source, the
 	// projects are whatever WakaTime saw you editing, discovered at runtime.
 	// AI sessions name projects too, unless [ai] is disabled.
+	if c.Activity.Source == "ai" && c.AI.Disabled {
+		return fmt.Errorf("activity source \"ai\" needs [ai] enabled")
+	}
 	if len(c.Projects) == 0 && c.Activity.Source != "wakatime" && c.AI.Disabled {
 		return fmt.Errorf("no [[project]] entries, and with [ai] disabled activity source %q cannot discover any; list projects, set source = \"wakatime\", or re-enable [ai]", c.Activity.Source)
 	}

@@ -146,3 +146,17 @@ func repoRoot(file, home string) string {
 	}
 	return ""
 }
+
+// ProjectFor resolves any path inside a repository --- a file or a folder ---
+// to that repository, named the way WakaTime names it. Sources other than
+// WakaTime (AI agent transcripts) use it so every project gets one name.
+func ProjectFor(path string) (Project, bool) {
+	home, _ := os.UserHomeDir()
+	// repoRoot starts from the parent of what it is given; a child name makes
+	// a folder its own starting point.
+	root := repoRoot(filepath.Join(path, "_"), home)
+	if root == "" {
+		return Project{}, false
+	}
+	return Project{Name: projectName(root), Path: root}, true
+}

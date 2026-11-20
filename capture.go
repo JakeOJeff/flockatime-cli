@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/aitrace"
 	"snapshot-agent/internal/cadence"
 	"snapshot-agent/internal/config"
@@ -237,4 +238,90 @@ func (c *capturer) syncAI() {
 	}
 	c.ai.Sync(c.aiSrc)
 	c.aiSynced = time.Now()
+}
+
+// aiSource makes AI agent sessions an activity source: a Claude Code or Codex
+// session wakes the agent and names the projects it works in, with or without
+// WakaTime installed.
+type aiSource struct{ c *capturer }
+
+func (a aiSource) LastActivity() time.Time {
+	a.c.syncAI()
+	return a.c.ai.LastActivity()
+}
+
+func (a aiSource) Describe() string { return "AI agent sessions (Claude Code, Codex)" }
+
+// RecentProjects are the repositories AI sessions were live in or wrote to
+// since the given time, newest first.
+func (a aiSource) RecentProjects(since time.Time) []activity.Project {
+	a.c.syncAI()
+	var out []activity.Project
+	seen := map[string]bool{}
+	for _, d := range a.c.ai.RecentDirs(since) {
+		p, ok := activity.ProjectFor(d)
+		if !ok || seen[aitrace.Key(p.Path)] {
+			continue
+		}
+		seen[aitrace.Key(p.Path)] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// newSource is the configured activity source, joined by AI sessions unless
+// [ai] is disabled. capt may be nil, which leaves AI out.
+func newSource(cfg *config.Config, capt *capturer) (activity.Source, error) {
+	if cfg.Activity.Source == "ai" {
+		// AI sessions alone: for machines without WakaTime.
+		if capt == nil || capt.ai == nil {
+			return nil, fmt.Errorf("activity source \"ai\" needs AI attribution, which is disabled or unavailable")
+		}
+		return activity.Any{aiSource{capt}}, nil
+	}
+	src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+	if err != nil {
+		return nil, err
+	}
+	if capt == nil || capt.ai == nil {
+		return src, nil
+	}
+	return activity.Any{src, aiSource{capt}}, nil
+}
+
+// sourceFor is newSource for commands that do not capture (doctor, reveal):
+// it brings its own capturer for the AI trace, and still works without one.
+func sourceFor(cfg *config.Config) (activity.Source, error) {
+	c, err := newCapturer(cfg)
+	if err != nil {
+		c = nil
+	}
+	return newSource(cfg, c)
+}
+
+// printAI is doctor's view of the AI trace: what was read and what it found.
+func printAI(cfg *config.Config) {
+	if cfg.AI.Disabled {
+		fmt.Printf("ai:       off ([ai] disabled = true)\n")
+		return
+	}
+	c, err := newCapturer(cfg)
+	if err != nil || c.ai == nil {
+		fmt.Printf("ai:       unavailable --- %v\n", err)
+		return
+	}
+	c.syncAI()
+	if err := c.ai.Save(); err != nil {
+		fmt.Printf("ai:       could not save the trace --- %v\n", err)
+	}
+	lines := 0
+	for _, f := range c.ai.Files {
+		lines += len(f.Lines)
+	}
+	fmt.Printf("ai:       %d transcript(s) read from %s and %s\n", len(c.ai.Cursors), c.aiSrc.ClaudeDir, c.aiSrc.CodexDir)
+	fmt.Printf("          %d file(s) with agent-written lines (%d distinct lines), %d event(s) kept\n",
+		len(c.ai.Files), lines, len(c.ai.Events))
+	if last := c.ai.LastActivity(); !last.IsZero() {
+		fmt.Printf("          last AI session activity %s ago\n", time.Since(last).Round(time.Second))
+	}
 }

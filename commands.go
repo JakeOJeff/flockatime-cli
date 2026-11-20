@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"snapshot-agent/internal/activity"
+	"snapshot-agent/internal/aitrace"
 	"snapshot-agent/internal/cadence"
 	"snapshot-agent/internal/config"
 	"snapshot-agent/internal/fingerprint"
@@ -68,7 +69,7 @@ func cmdOnce(args []string) error {
 		}
 		// Resolve projects the same way `run` does, so `once` shows what
 		// would actually be sent rather than only what was pinned by hand.
-		src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+		src, err := newSource(cfg, c)
 		if err != nil {
 			return err
 		}
@@ -111,11 +112,6 @@ func cmdRun(args []string) error {
 		return err
 	}
 
-	src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
-	if err != nil {
-		return err
-	}
-
 	// Update before opening the queue: the restarted process needs its lock.
 	update.CleanupOld()
 	upd := &autoUpdater{enabled: cfg.AutoUpdateEnabled()}
@@ -137,6 +133,10 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	src, err := newSource(cfg, capt)
+	if err != nil {
+		return err
+	}
 	capt.poller = cadence.New()
 	saves := &savePoll{p: capt.poller}
 	defer saves.stop()
@@ -147,7 +147,7 @@ func cmdRun(args []string) error {
 	logf("capturing every %s, endpoint %s", interval, cfg.Endpoint)
 	logf("activity: %s --- dormant after %s quiet, checked every %s", src.Describe(), idleAfter, poll)
 	if len(cfg.Projects) > 0 {
-		logf("%d project(s) pinned in the config; others come from WakaTime", len(cfg.Projects))
+		logf("%d project(s) pinned in the config; others come from WakaTime and AI sessions", len(cfg.Projects))
 	}
 
 	stop := make(chan os.Signal, 1)
@@ -186,7 +186,7 @@ func cmdRun(args []string) error {
 			projects = lastProjects
 		}
 		if len(projects) == 0 {
-			logf("nothing to capture --- WakaTime has not reported a file in a repository recently")
+			logf("nothing to capture --- no WakaTime heartbeat or AI session in a repository recently")
 			return nil
 		}
 		lastProjects = projects
@@ -254,30 +254,35 @@ func cmdRun(args []string) error {
 	}
 }
 
-// activeProjects is what the agent captures on a given tick: the projects
-// WakaTime saw edits in recently, plus any listed by hand in the config.
+// activeProjects is what the agent captures on a given tick: any projects
+// listed by hand in the config, then the repositories WakaTime saw edits in
+// and AI agent sessions worked in recently.
 //
-// Nothing is scanned for. WakaTime already resolved which file you are in, so
-// the agent snapshots that repository and no others --- which is why there is
-// no root to configure and no cost that scales with how many checkouts you
-// happen to own.
+// Nothing is scanned for. WakaTime and the agents' transcripts already say
+// which repository you were in, so the agent snapshots those and no others ---
+// which is why there is no root to configure and no cost that scales with how
+// many checkouts you happen to own.
 func activeProjects(cfg *config.Config, src activity.Source, since time.Time) []config.Project {
 	out := append([]config.Project{}, cfg.Projects...)
-
-	w, ok := src.(activity.WakaTime)
-	if !ok {
-		return out
-	}
 	seen := make(map[string]bool, len(out))
 	for _, p := range out {
-		seen[p.Path] = true
+		seen[aitrace.Key(p.Path)] = true
 	}
-	for _, p := range w.RecentProjects(since) {
-		if seen[p.Path] {
-			continue // already listed by hand; the manual name wins
+	type finder interface {
+		RecentProjects(since time.Time) []activity.Project
+	}
+	for _, s := range activity.Flatten(src) {
+		f, ok := s.(finder)
+		if !ok {
+			continue
 		}
-		seen[p.Path] = true
-		out = append(out, config.Project{Name: p.Name, Path: p.Path})
+		for _, p := range f.RecentProjects(since) {
+			if seen[aitrace.Key(p.Path)] {
+				continue // already listed by hand, or found by an earlier source
+			}
+			seen[aitrace.Key(p.Path)] = true
+			out = append(out, config.Project{Name: p.Name, Path: p.Path})
+		}
 	}
 	return out
 }
@@ -367,6 +372,7 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("api_key:  %s\n", mask(cfg.APIKey))
 
 	printActivity(cfg)
+	printAI(cfg)
 	printDaemon()
 
 	client := transport.New(cfg.Endpoint, cfg.APIKey)
@@ -386,7 +392,7 @@ func cmdDoctor(args []string) error {
 		fmt.Printf("queue:    unavailable --- %v\n", err)
 	}
 
-	src, _ := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+	src, _ := sourceFor(cfg)
 	projects := cfg.Projects
 	if src != nil {
 		projects = activeProjects(cfg, src, time.Now().Add(-cfg.IdleAfter()))
@@ -520,7 +526,7 @@ func ago(unix int64) string {
 // printActivity reports which state `run` would start in and why --- the
 // first question to ask when the agent is quiet and you expected snapshots.
 func printActivity(cfg *config.Config) {
-	src, err := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+	src, err := sourceFor(cfg)
 	if err != nil {
 		fmt.Printf("activity: INVALID --- %v\n", err)
 		return

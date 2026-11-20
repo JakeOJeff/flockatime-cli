@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"snapshot-agent/internal/activity"
 	"snapshot-agent/internal/config"
 	"snapshot-agent/internal/snapshot"
 )
@@ -55,7 +54,7 @@ func cmdReveal(args []string) error {
 	case cfg == nil:
 		return fmt.Errorf("no usable config; pass --dir PATH to search a directory")
 	default:
-		src, _ := activity.New(cfg.Activity.Source, cfg.Activity.WakaTimeDir)
+		src, _ := sourceFor(cfg)
 		projects = cfg.Projects
 		if src != nil {
 			projects = activeProjects(cfg, src, time.Now().Add(-revealLookback))
